@@ -1,35 +1,59 @@
 #pragma once
+
 #include "wled.h"
 #include "esp-knx-ip.h"
 
-#ifndef USERMOD_ID_KNX_IP
-#define USERMOD_ID_KNX_IP 0xA902   // pick any free value (or use USERMOD_ID_UNSPECIFIED)
-#endif
-
 class KnxIpUsermod : public Usermod {
 public:
-  // Defaults; can be overridden via JSON config
-  uint8_t  gaPowerMain   = 1, gaPowerMid   = 1, gaPowerSub   = 10;
-  uint8_t  gaDimMain     = 1, gaDimMid     = 1, gaDimSub     = 11;
-  uint16_t pa            = 0x1101;
-  bool     enablePublish = true;
+  // --- Config values (editable via JSON/UI) ---
+  bool  enabled = true;
+  char  individualAddr[16] = "1.1.100";
 
-  void setup() override;
-  void loop() override;
+  // Inbound GAs (commands from KNX -> WLED)
+  char  gaInPower[16]   = "1/0/1";   // DPT 1.001
+  char  gaInBri[16]     = "1/0/2";   // DPT 5.001 (0..100%)
+  char  gaInR[16]       = "1/1/1";   // DPT 5.001 (0..100%) per channel
+  char  gaInG[16]       = "1/1/2";   // DPT 5.001 (0..100%) per channel
+  char  gaInB[16]       = "1/1/3";   // DPT 5.001 (0..100%) per channel
+  char  gaInFx[16]      = "1/2/1";   // DPT 5.xxx (0..255)
+  char  gaInPreset[16]  = "1/2/2";   // DPT 5.xxx (WLED preset)
 
-  void addToConfig(JsonObject &root) override;
-  bool readFromConfig(JsonObject &root) override;
+  // Outbound GAs (state feedback WLED -> KNX)
+  char  gaOutPower[16]  = "2/0/1";    // DPT 1.001
+  char  gaOutBri[16]    = "2/0/2";    // DPT 5.001
+  char  gaOutFx[16]     = "2/2/1";    // DPT 5.xxx
+  char  gaOutR[16]       = "";        // DPT 5.001 (0..100%) per channel
+  char  gaOutG[16]       = "";        // DPT 5.001 (0..100%) per channel
+  char  gaOutB[16]       = "";        // DPT 5.001 (0..100%) per channel
+  char  gaOutPreset[16]  = "";        // DPT 5.xxx (0..255) – last applied/known preset
+  
+  // TX coalescing
+  uint16_t txRateLimitMs = 200;
 
-  uint16_t getId() override { return USERMOD_ID_KNX_IP; }  // or USERMOD_ID_UNSPECIFIED
-  const char* getName() { return "KNX-IP"; }               // no 'override' needed in some WLED versions
+  // --- Usermod API ---
+  void setup();
+  void loop();
+  void addToConfig(JsonObject& root);
+  bool readFromConfig(JsonObject& root);
+  uint16_t getId() { return USERMOD_ID_RESERVED; }   // change to a free ID later
+  const char* getName() { return "KNX_IP"; }
 
 private:
-  bool _started = false;
-  uint32_t _lastPubMs = 0;
+  // --- TX coalescing flags/timer ---
+  unsigned long _nextTxAt = 0;
+  bool _pendingTxPower = false, _pendingTxBri = false, _pendingTxFx = false;
 
-  uint16_t _gaPower() const { return knxMakeGroupAddress(gaPowerMain, gaPowerMid, gaPowerSub); }
-  uint16_t _gaDim()   const { return knxMakeGroupAddress(gaDimMain,   gaDimMid,   gaDimSub);   }
+  // Track last preset value we set (used for OUT if configured)
+  uint8_t _lastPreset = 0;
 
-  void _onKnx(uint16_t ga, DptMain dpt, KnxService svc, const uint8_t* payload, uint8_t len);
-  void _publishState();
+  // Outbound state
+  void publishState();
+  void scheduleStatePublish(bool pwr, bool bri, bool fx);
+
+  // handlers (KNX -> WLED)
+  void onKnxPower(bool on);
+  void onKnxBrightness(uint8_t pct); // 0..100
+  void onKnxRGB(uint8_t r, uint8_t g, uint8_t b);
+  void onKnxEffect(uint8_t fxIndex);
+  void onKnxPreset(uint8_t preset);
 };
