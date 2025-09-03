@@ -19,25 +19,26 @@ public:
   char  gaInR[16]       = "1/1/1";   // DPT 5.001 (0..100%) per channel
   char  gaInG[16]       = "1/1/2";   // DPT 5.001 (0..100%) per channel
   char  gaInB[16]       = "1/1/3";   // DPT 5.001 (0..100%) per channel
+  char  gaInW[16]       = "1/1/4";   // White level (DPT 5.001 0..100%)
+  char  gaInCct[16]     = "1/1/5";   // CCT mix (0=warm .. 100=cold) DPT 5.001
+  char  gaInWW[16]      = "1/1/6";   // Optional: Warm white level  (DPT 5.001)
+  char  gaInCW[16]      = "1/1/7";   // Optional: Cold white level  (DPT 5.001)
   char  gaInFx[16]      = "1/2/1";   // DPT 5.xxx (0..255)
   char  gaInPreset[16]  = "1/2/2";   // DPT 5.xxx (WLED preset)
-  char  gaInW[16]       = "";        // White level (DPT 5.001 0..100%)
-  char  gaInCct[16]     = "";      // CCT mix (0=warm .. 100=cold) DPT 5.001
-  char  gaInWW[16]      = "";      // Optional: Warm white level  (DPT 5.001)
-  char  gaInCW[16]      = "";      // Optional: Cold white level  (DPT 5.001)
-
+  
   // Outbound GAs (state feedback WLED -> KNX)
   char  gaOutPower[16]  = "2/0/1";    // DPT 1.001
   char  gaOutBri[16]    = "2/0/2";    // DPT 5.001
+  char  gaOutR[16]      = "2/1/1";    // DPT 5.001 (0..100%) per channel
+  char  gaOutG[16]      = "2/1/2";    // DPT 5.001 (0..100%) per channel
+  char  gaOutB[16]      = "2/1/3";    // DPT 5.001 (0..100%) per channel
+  char  gaOutW[16]      = "2/1/4";    // White level (DPT 5.001)
+  char  gaOutCct[16]    = "2/1/5";    // CCT mix (DPT 5.001)
+  char  gaOutWW[16]     = "2/1/6";    // Optional: derived warm white (DPT 5.001)
+  char  gaOutCW[16]     = "2/1/7";    // Optional: derived cold white (DPT 5.001)
   char  gaOutFx[16]     = "2/2/1";    // DPT 5.xxx
-  char  gaOutR[16]      = "";         // DPT 5.001 (0..100%) per channel
-  char  gaOutG[16]      = "";         // DPT 5.001 (0..100%) per channel
-  char  gaOutB[16]      = "";         // DPT 5.001 (0..100%) per channel
-  char  gaOutPreset[16] = "";         // DPT 5.xxx (0..255) – last applied/known preset
-  char  gaOutW[16]      = "";         // White level (DPT 5.001)
-  char  gaOutCct[16]    = "";         // CCT mix (DPT 5.001)
-  char  gaOutWW[16]     = "";         // Optional: derived warm white (DPT 5.001)
-  char  gaOutCW[16]     = "";         // Optional: derived cold white (DPT 5.001)
+  char  gaOutPreset[16] = "2/2/2";    // DPT 5.xxx (0..255) – last applied/known preset
+
   // TX coalescing
   uint16_t txRateLimitMs = 200;
 
