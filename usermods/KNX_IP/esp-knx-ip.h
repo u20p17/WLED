@@ -22,6 +22,15 @@
 #include <map>
 #include <functional>
 
+#ifndef KNX_DEBUG
+#define KNX_DEBUG 1   // 1=enable Serial logs, 0=disable
+#endif
+#if KNX_DEBUG
+#  define KNX_LOG(fmt, ...) do { Serial.printf("[KNX] " fmt "\n", ##__VA_ARGS__); } while(0)
+#else
+#  define KNX_LOG(fmt, ...) do {} while(0)
+#endif
+
 #ifndef KNX_ENABLE_RUNTIME_CONFIG
 #define KNX_ENABLE_RUNTIME_CONFIG 0   // 0 = no runtime config/storage (stubs only)
 #endif
@@ -55,6 +64,7 @@ enum class KnxService : uint8_t {
 enum class DptMain : uint16_t {
   DPT_1xx  = 1,   // 1 bit
   DPT_5xx  = 5,   // 8 bit (0..255 / 0..100%)
+  DPT_7xx  = 7,   // 2 byte (e.g., Kelvin / unsigned 16)
   DPT_9xx  = 9,   // 2-byte float
   // add more as needed
 };

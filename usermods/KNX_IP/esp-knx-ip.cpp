@@ -20,18 +20,39 @@ static constexpr size_t   UDP_BUF_SIZE = 512;
 // ======== Global instance as declared in header ========
 KnxIpCore KNX;
 
+// small local hex-dump helper for debugging (first up to 96 bytes)
+static void knx_dump_hex(const char* tag, const uint8_t* data, size_t len) {
+  if (!data || !len) { return; }
+  const size_t maxDump = len < 96 ? len : 96;
+  Serial.printf("[KNX] %s (%u bytes): ", tag, (unsigned)len);
+  for (size_t i = 0; i < maxDump; ++i) {
+    Serial.printf("%02X", data[i]);
+    if (i + 1 < maxDump) Serial.print(' ');
+  }
+  if (maxDump < len) Serial.print(" ...");
+  Serial.print('\n');
+}
+
 
 // ======== Begin / End / Loop ========
 bool KnxIpCore::begin() {
   if (_running) return true;
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED) {
+     KNX_LOG("begin(): WiFi not connected (status=%d).", (int)WiFi.status());
+     return false;
+  }
 
+  KNX_LOG("begin(): joining multicast %u.%u.%u.%u:%u from %s",
+         _maddr[0], _maddr[1], _maddr[2], _maddr[3], (unsigned)KNX_IP_UDP_PORT,
+         WiFi.localIP().toString().c_str());
   // Join KNX multicast
   if (!_udp.beginMulticast(_maddr, KNX_IP_UDP_PORT)) {
     _rxErrors++;
+    KNX_LOG("begin(): beginMulticast() FAILED.");
     return false;
   }
   _running = true;
+  KNX_LOG("begin(): OK (running=1).");
   return true;
 }
 
@@ -47,16 +68,24 @@ void KnxIpCore::loop() {
   uint8_t buf[UDP_BUF_SIZE];
   int len = _udp.parsePacket();
   if (len <= 0) return;
+  KNX_LOG("loop(): UDP packet: len=%d from %s:%u",
+          len, _udp.remoteIP().toString().c_str(), (unsigned)_udp.remotePort());
 
   if (len > (int)sizeof(buf)) {
     // drain
     while (_udp.available()) (void)_udp.read();
     _rxErrors++;
+    KNX_LOG("loop(): packet too large (%d), drained. rxErrors=%u", len, (unsigned)_rxErrors);
     return;
   }
 
   int got = _udp.read(buf, len);
-  if (got <= 0) return;
+  if (got <= 0) {
+    KNX_LOG("loop(): read() returned %d.", got);
+    return;
+  }
+  // debug: dump what we received
+  knx_dump_hex("RX packet", buf, got);
 
   _handleIncoming(buf, got);
 }
@@ -79,7 +108,10 @@ bool KnxIpCore::groupValueResponse(uint16_t ga, const uint8_t* data, uint8_t len
 
 // ======== Low-level send ========
 bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen) {
-  if (!_running) return false;
+  if (!_running) {
+    KNX_LOG("TX: not running, drop.");
+    return false;
+  }
 
   // Build cEMI L_Data.req
   // cEMI format (for L_Data.req / L_Data.ind):
@@ -114,6 +146,10 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   const uint8_t ctrl1     = CEMI_CTRL1_DEFAULT;
   const uint8_t ctrl2     = CEMI_CTRL2_GROUP_HC6;
   const uint16_t srcAddr  = _pa; // if 0, still acceptable in IP routing context
+
+  KNX_LOG("TX: GA=%u/%u/%u (0x%04X) svc=%u asduLen=%u srcPA=%u.%u.%u",
+          knxGaMain(ga), knxGaMiddle(ga), knxGaSub(ga), ga, (unsigned)svc, (unsigned)asduLen,
+          (unsigned)((_pa>>12)&0x0F), (unsigned)((_pa>>8)&0x0F), (unsigned)(_pa&0xFF));
 
   // Compose TPDU header:
   uint8_t tpdu0 = 0x00; // unnumbered data group (low 2 bits = 0)
@@ -175,15 +211,30 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   // cEMI payload
   for (uint8_t i = 0; i < idx; ++i) frame[p++] = cemi[i];
 
+  // debug: dump the whole KNXnet/IP Routing Request we're about to send
+  knx_dump_hex("TX frame", frame, p);
+
   // Send
   // Some ESP32 WiFiUDP variants don't implement beginPacketMulticast;
   // sending to the multicast address via beginPacket works instead.
   int sent = _udp.beginPacket(_maddr, KNX_IP_UDP_PORT);
-  if (sent == 0) { _txErrors++; return false; }
+  if (sent == 0) {
+    _txErrors++;
+    KNX_LOG("TX: beginPacket() FAILED. txErrors=%u", (unsigned)_txErrors);
+    return false;
+  }
   sent = _udp.write(frame, p);
   bool ok = _udp.endPacket();
 
-  if (!ok || sent != p) { _txErrors++; return false; }
+  if (!ok || sent != p) {
+    _txErrors++;
+    KNX_LOG("TX: endPacket()=%d write=%d/%d txErrors=%u",
+            (int)ok, sent, p, (unsigned)_txErrors);
+    return false;
+  }
+  KNX_LOG("TX: sent %d bytes to %u.%u.%u.%u:%u (txPackets=%u)",
+          p, _maddr[0], _maddr[1], _maddr[2], _maddr[3], (unsigned)KNX_IP_UDP_PORT,
+          (unsigned)(_txPackets+1));
   _txPackets++;
   return true;
 }
@@ -192,28 +243,31 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
 // ======== Internal RX path ========
 void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
   // Validate KNXnet/IP header (min 6 bytes)
-  if (len < 6) { _rxErrors++; return; }
+  if (len < 6) { _rxErrors++; KNX_LOG("RX: too short (%d).", len); return; }
 
   uint8_t  headerSize  = buf[0];
   uint8_t  proto       = buf[1];
   uint16_t svc         = (uint16_t(buf[2]) << 8) | buf[3];
   uint16_t totalLen    = (uint16_t(buf[4]) << 8) | buf[5];
 
-  if (headerSize != 0x06 || proto != KNX_PROTOCOL_VERSION) { _rxErrors++; return; }
+if (headerSize != 0x06 || proto != KNX_PROTOCOL_VERSION) {
+    _rxErrors++; KNX_LOG("RX: bad header: size=0x%02X proto=0x%02X.", headerSize, proto); return;
+  }
   if (totalLen != len) {
     // Some stacks pad UDP; be lenient if totalLen <= len
-    if (totalLen > len) { _rxErrors++; return; }
+    if (totalLen > len) { _rxErrors++; KNX_LOG("RX: totalLen(%u)>len(%d).", (unsigned)totalLen, len); return; }
   }
 
   // Routing Indication frames carry cEMI
   if (svc != KNX_SVC_ROUTING_IND) {
     // ignore other services (search response, tunneling, etc.)
+    KNX_LOG("RX: ignore svc=0x%04X (not Routing_Ind).", (unsigned)svc);
     return;
   }
 
   // cEMI starts after 6 bytes
   if (len < 6 + 10) { // minimal cEMI header size check
-    _rxErrors++; return;
+    _rxErrors++; KNX_LOG("RX: cEMI too short (len=%d).", len); return;
   }
   const uint8_t* cemi = buf + 6;
   int cemiLen = len - 6;
@@ -224,10 +278,11 @@ void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
 
   if (msgCode != CEMI_LDATA_IND && msgCode != CEMI_LDATA_REQ) {
     // We only care about L_Data.ind/req on routing
+    KNX_LOG("RX: msgCode=0x%02X not L_Data.(ind|req).", msgCode);
     return;
   }
 
-  if (cemiLen < 10) { _rxErrors++; return; }
+  if (cemiLen < 10) { _rxErrors++; KNX_LOG("RX: cEMI header truncated (cemiLen=%d).", cemiLen); return; }
 
   uint8_t ctrl1 = cemi[2];
   uint8_t ctrl2 = cemi[3];
@@ -247,6 +302,7 @@ void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
   bool isGroup = (ctrl2 & 0x80) != 0;
   if (!isGroup) {
     // Not a group address -> ignore for our API
+    KNX_LOG("RX: dst=0x%04X not group (ctrl2=0x%02X).", dst, ctrl2);
     return;
   }
 
@@ -259,6 +315,7 @@ void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
     case 0x2: svcDetected = KnxService::GroupValue_Write; break;
     default:
       // other APCIs (A/B writing, memory read/write, etc.) not handled here
+      KNX_LOG("RX: APCI=0x%X not handled.", apci4);
       return;
   }
 
@@ -284,17 +341,26 @@ void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
   }
 
   // If we have a registered group object & callback, dispatch
+  
+  KNX_LOG("RX: src=%u.%u.%u dst=%u/%u/%u (0x%04X) apduLen=%u svc=%u lenASDU=%u",
+          (unsigned)((src>>12)&0x0F), (unsigned)((src>>8)&0x0F), (unsigned)(src&0xFF),
+          knxGaMain(dst), knxGaMiddle(dst), knxGaSub(dst), dst, (unsigned)apduLen, (unsigned)svcDetected, (unsigned)asduLen);
+
   auto itGo = _gos.find(dst);
   if (itGo != _gos.end()) {
     DptMain dpt = itGo->second.dpt;
     auto itCb = _callbacks.find(dst);
     if (itCb != _callbacks.end() && itCb->second) {
       itCb->second(dst, dpt, svcDetected, asdu, asduLen);
+      KNX_LOG("RX: dispatched to GA 0x%04X callback.", dst);
     }
+  } else {
+    KNX_LOG("RX: no registered GA for 0x%04X.", dst);
   }
 
   (void)src; // available if you want to use/forward it
   _rxPackets++;
+  KNX_LOG("RX: done (rxPackets=%u).", (unsigned)_rxPackets);
 }
 
 
