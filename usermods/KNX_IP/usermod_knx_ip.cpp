@@ -358,6 +358,11 @@ void KnxIpUsermod::setup() {
     Serial.println("[KNX-UM] WiFi connected but no IP yet, deferring KNX.begin().");
     return;
   }
+
+  #ifdef ARDUINO_ARCH_ESP32
+  WiFi.setSleep(false);     // modem-sleep off helps multicast reliability
+  #endif
+
   bool ok = KNX.begin();
   Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n",
                 ok ? "OK" : "FAILED",
@@ -438,7 +443,6 @@ void KnxIpUsermod::publishState() {
   // Clear pending flags after publish
   _pendingTxPower = _pendingTxBri = _pendingTxFx = false;
 }
-
 
 void KnxIpUsermod::loop() {
   if (!enabled) return;
@@ -668,7 +672,6 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
 
   return true;
 }
-
 
 void KnxIpUsermod::appendConfigData(Print& uiScript)
 {

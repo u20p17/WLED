@@ -18,7 +18,11 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiUdp.h>
+#include <lwip/sockets.h>
+#include <sys/socket.h>
+#include <lwip/igmp.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <map>
 #include <functional>
 
@@ -163,8 +167,9 @@ private:
   bool _composeAndSendApci(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen);
 
 private:
-  WiFiUDP     _udp;
-  IPAddress   _maddr;
+  int         _sock;      // raw UDP socket
+  IPAddress   _maddr;     // multicast group address
+  struct sockaddr_in _mcastAddr; // cached multicast sockaddr
   uint16_t    _pa;  // physical address (optional / informational)
   bool        _running;
 
@@ -183,14 +188,17 @@ private:
 // ===== Implementation details (small inlines) =====
 
 inline KnxIpCore::KnxIpCore()
-: _maddr(KNX_IP_MULTICAST_A, KNX_IP_MULTICAST_B, KNX_IP_MULTICAST_C, KNX_IP_MULTICAST_D)
+: _sock(-1)
+, _maddr(KNX_IP_MULTICAST_A, KNX_IP_MULTICAST_B, KNX_IP_MULTICAST_C, KNX_IP_MULTICAST_D)
 , _pa(0)
 , _running(false)
 , _rxPackets(0)
 , _txPackets(0)
 , _rxErrors(0)
 , _txErrors(0)
-{}
+{
+  memset(&_mcastAddr, 0, sizeof(_mcastAddr));
+}
 
 inline void KnxIpCore::addGroupObject(uint16_t ga, DptMain dpt, bool transmit, bool receive) {
   _gos[ga] = KnxGroupObject{ga, dpt, transmit, receive};

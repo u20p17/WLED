@@ -38,27 +38,61 @@ static void knx_dump_hex(const char* tag, const uint8_t* data, size_t len) {
 bool KnxIpCore::begin() {
   if (_running) return true;
   if (WiFi.status() != WL_CONNECTED) {
-     KNX_LOG("begin(): WiFi not connected (status=%d).", (int)WiFi.status());
-     return false;
-  }
-
-  KNX_LOG("begin(): joining multicast %u.%u.%u.%u:%u from %s",
-         _maddr[0], _maddr[1], _maddr[2], _maddr[3], (unsigned)KNX_IP_UDP_PORT,
-         WiFi.localIP().toString().c_str());
-  // Join KNX multicast
-  if (!_udp.beginMulticast(_maddr, KNX_IP_UDP_PORT)) {
-    _rxErrors++;
-    KNX_LOG("begin(): beginMulticast() FAILED.");
+    KNX_LOG("begin(): WiFi not connected (status=%d).", (int)WiFi.status());
     return false;
   }
+
+  // Create UDP socket
+  _sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (_sock < 0) { _rxErrors++; KNX_LOG("begin(): socket() failed errno=%d", errno); return false; }
+
+  // Allow address reuse
+  int yes = 1;
+  (void)::setsockopt(_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+  // Bind to INADDR_ANY:3671
+  struct sockaddr_in local; memset(&local, 0, sizeof(local));
+  local.sin_family = AF_INET;
+  local.sin_port   = htons(KNX_IP_UDP_PORT);
+  local.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (::bind(_sock, (struct sockaddr*)&local, sizeof(local)) < 0) {
+    _rxErrors++; KNX_LOG("begin(): bind() failed errno=%d", errno); ::close(_sock); _sock=-1; return false; }
+
+in_addr maddr{};        maddr.s_addr = inet_addr("224.0.23.12");        // KNX group
+in_addr ifaddr{};       ifaddr.s_addr = inet_addr(WiFi.localIP().toString().c_str());
+
+// Join multicast group on all interfaces (or use ifaddr here if you prefer)
+ip_mreq mreq{}; 
+mreq.imr_multiaddr = maddr;
+mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+if (::setsockopt(_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+  _rxErrors++; KNX_LOG("begin(): IP_ADD_MEMBERSHIP failed errno=%d", errno);
+}
+
+// TTL=1 and LOOP=1 are fine…
+uint8_t ttl = 1;  (void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_TTL,  &ttl,  sizeof(ttl));
+uint8_t loop = 1; (void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+
+// Select WiFi STA as multicast egress
+(void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr));
+
+// Prepare sockaddr for send()
+memset(&_mcastAddr, 0, sizeof(_mcastAddr));
+_mcastAddr.sin_family = AF_INET;
+_mcastAddr.sin_port   = htons(KNX_IP_UDP_PORT);
+_mcastAddr.sin_addr   = maddr;
+
+  // Non-blocking
+  fcntl(_sock, F_SETFL, O_NONBLOCK);
+
+  KNX_LOG("begin(): joined %u.%u.%u.%u:%u (sock=%d)", _maddr[0], _maddr[1], _maddr[2], _maddr[3], (unsigned)KNX_IP_UDP_PORT, _sock);
   _running = true;
-  KNX_LOG("begin(): OK (running=1).");
   return true;
 }
 
 void KnxIpCore::end() {
   if (!_running) return;
-  _udp.stop();
+  if (_sock >= 0) { ::close(_sock); _sock = -1; }
   _running = false;
 }
 
@@ -66,28 +100,12 @@ void KnxIpCore::loop() {
   if (!_running) return;
 
   uint8_t buf[UDP_BUF_SIZE];
-  int len = _udp.parsePacket();
-  if (len <= 0) return;
-  KNX_LOG("loop(): UDP packet: len=%d from %s:%u",
-          len, _udp.remoteIP().toString().c_str(), (unsigned)_udp.remotePort());
-
-  if (len > (int)sizeof(buf)) {
-    // drain
-    while (_udp.available()) (void)_udp.read();
-    _rxErrors++;
-    KNX_LOG("loop(): packet too large (%d), drained. rxErrors=%u", len, (unsigned)_rxErrors);
-    return;
-  }
-
-  int got = _udp.read(buf, len);
-  if (got <= 0) {
-    KNX_LOG("loop(): read() returned %d.", got);
-    return;
-  }
-  // debug: dump what we received
-  knx_dump_hex("RX packet", buf, got);
-
-  _handleIncoming(buf, got);
+  struct sockaddr_in from; socklen_t flen = sizeof(from);
+  int len = ::recvfrom(_sock, (char*)buf, sizeof(buf), 0, (struct sockaddr*)&from, &flen);
+  if (len <= 0) return; // EWOULDBLOCK
+  // debug
+  knx_dump_hex("RX packet", buf, len);
+  _handleIncoming(buf, len);
 }
 
 
@@ -141,7 +159,7 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   uint8_t cemi[64];
   uint8_t idx = 0;
 
-  const uint8_t msgCode   = CEMI_LDATA_REQ;
+  const uint8_t msgCode   = CEMI_LDATA_IND;
   const uint8_t addInfo   = 0x00;
   const uint8_t ctrl1     = CEMI_CTRL1_DEFAULT;
   const uint8_t ctrl2     = CEMI_CTRL2_GROUP_HC6;
@@ -150,6 +168,21 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   KNX_LOG("TX: GA=%u/%u/%u (0x%04X) svc=%u asduLen=%u srcPA=%u.%u.%u",
           knxGaMain(ga), knxGaMiddle(ga), knxGaSub(ga), ga, (unsigned)svc, (unsigned)asduLen,
           (unsigned)((_pa>>12)&0x0F), (unsigned)((_pa>>8)&0x0F), (unsigned)(_pa&0xFF));
+
+  bool oneBit = false;
+  auto it = _gos.find(ga);
+  if (it != _gos.end()) {
+    oneBit = (it->second.dpt == DptMain::DPT_1xx);
+  } else {
+    // Fallback if GA wasn't registered: assume NOT 1-bit
+    oneBit = false;
+  }
+
+  if (svc == KnxService::GroupValue_Read) {
+  asdu = nullptr;
+  asduLen = 0;
+  // oneBit stays as determined; it won’t matter because no data follows.
+  }
 
   // Compose TPDU header:
   uint8_t tpdu0 = 0x00; // unnumbered data group (low 2 bits = 0)
@@ -162,8 +195,6 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
     case KnxService::GroupValue_Write:    apci2bits = 0b10; break; // APCI 0x2
   }
   tpdu1 = (uint8_t)(apci2bits << 6);
-
-  bool oneBit = (asduLen == 1);
 
   // Start cEMI
   cemi[idx++] = msgCode;
@@ -203,8 +234,8 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   uint16_t totalLen = 6 + idx;
   frame[p++] = 0x06;
   frame[p++] = KNX_PROTOCOL_VERSION;
-  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_REQ >> 8);
-  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_REQ & 0xFF);
+  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND >> 8);
+  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND & 0xFF);
   frame[p++] = (uint8_t)(totalLen >> 8);
   frame[p++] = (uint8_t)(totalLen & 0xFF);
 
@@ -214,27 +245,14 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   // debug: dump the whole KNXnet/IP Routing Request we're about to send
   knx_dump_hex("TX frame", frame, p);
 
-  // Send
-  // Some ESP32 WiFiUDP variants don't implement beginPacketMulticast;
-  // sending to the multicast address via beginPacket works instead.
-  int sent = _udp.beginPacket(_maddr, KNX_IP_UDP_PORT);
-  if (sent == 0) {
+  // ===== Send to 224.0.23.12:3671 =====
+  ssize_t sent = ::sendto(_sock, frame, p, 0, (struct sockaddr*)&_mcastAddr, sizeof(_mcastAddr));
+  if (sent != p) {
     _txErrors++;
-    KNX_LOG("TX: beginPacket() FAILED. txErrors=%u", (unsigned)_txErrors);
+    KNX_LOG("TX: sendto()=%d/%d errno=%d txErrors=%u", (int)sent, p, errno, (unsigned)_txErrors);
     return false;
   }
-  sent = _udp.write(frame, p);
-  bool ok = _udp.endPacket();
-
-  if (!ok || sent != p) {
-    _txErrors++;
-    KNX_LOG("TX: endPacket()=%d write=%d/%d txErrors=%u",
-            (int)ok, sent, p, (unsigned)_txErrors);
-    return false;
-  }
-  KNX_LOG("TX: sent %d bytes to %u.%u.%u.%u:%u (txPackets=%u)",
-          p, _maddr[0], _maddr[1], _maddr[2], _maddr[3], (unsigned)KNX_IP_UDP_PORT,
-          (unsigned)(_txPackets+1));
+  KNX_LOG("TX: sent %d bytes (txPackets=%u)", p, (unsigned)(_txPackets+1));
   _txPackets++;
   return true;
 }
@@ -371,5 +389,5 @@ bool KnxIpCore::_composeAndSendApci(uint16_t ga, KnxService svc, const uint8_t* 
 
 
 // ======== (Optional) convenience wrappers used by header ========
-bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen); // forward declared in header; implemented above.
+// (end of file)
 

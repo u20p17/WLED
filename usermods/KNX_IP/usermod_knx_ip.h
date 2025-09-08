@@ -102,5 +102,7 @@ private:
   uint8_t  _lastSentBri = 255;
   bool     _lastSentOn  = true;
   uint32_t _lastUiSendMs = 0;
+  uint8_t  _lastFxSent      = 0xFF;   // last effect index we published
+  int16_t  _lastPresetSent  = -1;     // last preset number we published
   const uint16_t _minUiSendIntervalMs = 300;  // debounce window
 };
