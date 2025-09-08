@@ -596,29 +596,20 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
 bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   JsonObject top = root["KNX_IP"];
   if (top.isNull()) {
-    // also accept legacy key "KNX-IP"
-    top = root["KNX-IP"];
+    top = root["KNX-IP"];       // legacy
     if (top.isNull()) return false;
   }
 
   enabled = top["enabled"] | enabled;
   strlcpy(individualAddr, top["individual_addr"] | individualAddr, sizeof(individualAddr));
-
-  // Read new Kelvin range (fallback to previous defaults)
   kelvinMin = top["cct_kelvin_min"] | kelvinMin;
   kelvinMax = top["cct_kelvin_max"] | kelvinMax;
-  // Periodic publish options
   periodicEnabled    = top["periodic_enabled"]     | periodicEnabled;
   periodicIntervalMs = top["periodic_interval_ms"] | periodicIntervalMs;
-  // sanitize
-  if (periodicIntervalMs < 200) periodicIntervalMs = 200;
-  if (kelvinMin < 1000) kelvinMin = 1000;
-  if (kelvinMax > 10000) kelvinMax = 10000;
-  if (kelvinMin == kelvinMax) kelvinMax = kelvinMin + 1;
-  if (kelvinMin > kelvinMax) { uint16_t t = kelvinMin; kelvinMin = kelvinMax; kelvinMax = t; }
 
-  JsonObject gIn  = top["in"];
-  JsonObject gOut = top["out"];
+  // 🔧 accept either "GA in"/"GA out" (what we save) or "in"/"out"
+  JsonObject gIn  = top["GA in"];  if (gIn.isNull())  gIn  = top["in"];
+  JsonObject gOut = top["GA out"]; if (gOut.isNull()) gOut = top["out"];
 
   if (!gIn.isNull()) {
     strlcpy(gaInPower,  gIn["power"]  | gaInPower,  sizeof(gaInPower));
@@ -650,7 +641,7 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
 
   txRateLimitMs = top["tx_rate_limit_ms"] | txRateLimitMs;
 
-  // refresh GA cache from new config
+  // refresh parsed GA cache
   GA_IN_PWR  = parseGA(gaInPower);
   GA_IN_BRI  = parseGA(gaInBri);
   GA_IN_R    = parseGA(gaInR);
@@ -677,6 +668,7 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
 
   return true;
 }
+
 
 void KnxIpUsermod::appendConfigData(Print& uiScript)
 {
