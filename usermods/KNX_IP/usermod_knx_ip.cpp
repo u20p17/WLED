@@ -669,7 +669,29 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   GA_OUT_CW  = parseGA(gaOutCW);
   GA_OUT_FX  = parseGA(gaOutFx);
   GA_OUT_PRE = parseGA(gaOutPreset);
+  // --- Apply at runtime (no reboot required) ---
+  if (enabled) {
+    // Update PA immediately if the string is valid
+    if (uint16_t pa = parsePA(individualAddr)) {
+      KNX.setIndividualAddress(pa);
+      Serial.printf("[KNX-UM] PA set to %u.%u.%u (0x%04X)\n",
+                    (unsigned)((pa>>12)&0x0F), (unsigned)((pa>>8)&0x0F), (unsigned)(pa&0xFF), pa);
+    } else {
+      Serial.println("[KNX-UM] WARNING: Invalid individual address string; PA not changed.");
+    }
 
+    // Tear down current KNX + registrations and rebuild
+    KNX.end();
+    KNX.clearRegistrations();
+
+    // Re-register all GAs and callbacks just like in setup()
+    // (reuse the same code path to avoid drift)
+    setup();
+
+    // Optional: push a fresh state snapshot (power/brightness/effect/colors)
+    // so KNX side sees the new GA mapping immediately.
+    scheduleStatePublish(true, true, true);
+  }
   return true;
 }
 

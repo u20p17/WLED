@@ -161,6 +161,10 @@ public:
   static uint8_t  unpackScaling(const uint8_t* p, uint8_t len);
   static float    unpack2ByteFloat(const uint8_t* p, uint8_t len);
 
+  bool running() const { return _running; }
+  void clearRegistrations();
+
+
 private:
   // Internal dispatch
   void _handleIncoming(const uint8_t* buf, int len);

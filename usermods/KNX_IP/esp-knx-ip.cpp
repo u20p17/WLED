@@ -73,9 +73,10 @@ if (::setsockopt(_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0)
 uint8_t ttl = 1;  (void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_TTL,  &ttl,  sizeof(ttl));
 uint8_t loop = 1; (void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
 
-// Select WiFi STA as multicast egress
-(void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr));
-
+// Pin outgoing multicast to the STA interface
+  if (::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr)) < 0) {
+    KNX_LOG("begin(): IP_MULTICAST_IF failed errno=%d", errno);
+  }
 // Prepare sockaddr for send()
 memset(&_mcastAddr, 0, sizeof(_mcastAddr));
 _mcastAddr.sin_family = AF_INET;
@@ -85,8 +86,9 @@ _mcastAddr.sin_addr   = maddr;
   // Non-blocking
   fcntl(_sock, F_SETFL, O_NONBLOCK);
 
-  KNX_LOG("begin(): joined %u.%u.%u.%u:%u (sock=%d)", _maddr[0], _maddr[1], _maddr[2], _maddr[3], (unsigned)KNX_IP_UDP_PORT, _sock);
-  _running = true;
+  KNX_LOG("begin(): joined %u.%u.%u.%u:%u (sock=%d)",
+          _maddr[0], _maddr[1], _maddr[2], _maddr[3],
+          (unsigned)KNX_IP_UDP_PORT, _sock);_running = true;
   return true;
 }
 
@@ -385,6 +387,11 @@ if (headerSize != 0x06 || proto != KNX_PROTOCOL_VERSION) {
 // ======== Compose and send APCI ========
 bool KnxIpCore::_composeAndSendApci(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen) {
   return sendCemiToGroup(ga, svc, asdu, asduLen);
+}
+
+void KnxIpCore::clearRegistrations() {
+  _gos.clear();
+  _callbacks.clear();
 }
 
 
