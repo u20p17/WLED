@@ -161,7 +161,7 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   uint8_t cemi[64];
   uint8_t idx = 0;
 
-  const uint8_t msgCode   = CEMI_LDATA_IND;
+  const uint8_t msgCode   = CEMI_LDATA_REQ;
   const uint8_t addInfo   = 0x00;
   const uint8_t ctrl1     = CEMI_CTRL1_DEFAULT;
   const uint8_t ctrl2     = CEMI_CTRL2_GROUP_HC6;
@@ -236,8 +236,8 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   uint16_t totalLen = 6 + idx;
   frame[p++] = 0x06;
   frame[p++] = KNX_PROTOCOL_VERSION;
-  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND >> 8);
-  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND & 0xFF);
+  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_REQ >> 8);
+  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_REQ & 0xFF);
   frame[p++] = (uint8_t)(totalLen >> 8);
   frame[p++] = (uint8_t)(totalLen & 0xFF);
 
