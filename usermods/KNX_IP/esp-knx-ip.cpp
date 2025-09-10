@@ -3,14 +3,13 @@
 // ======== Tunables / constants ========
 static constexpr uint8_t  KNX_PROTOCOL_VERSION = 0x10;   // KNXnet/IP proto version
 static constexpr uint16_t KNX_SVC_ROUTING_IND  = 0x0530; // Routing Indication (rx)
-static constexpr uint16_t KNX_SVC_ROUTING_REQ  = 0x0531; // Routing Request    (tx)
 static constexpr uint8_t  CEMI_LDATA_IND       = 0x29;   // cEMI L_Data.ind (rx)
-static constexpr uint8_t  CEMI_LDATA_REQ       = 0x11;   // cEMI L_Data.req (tx)
+
 
 // cEMI Control fields defaults:
 //  - Standard frame, no repeat suppression, priority=Low
 //  - Group Address, hop count 6 (typical), ACK disabled
-static constexpr uint8_t  CEMI_CTRL1_DEFAULT   = 0x00;   // std frame, low prio
+static constexpr uint8_t  CEMI_CTRL1_DEFAULT   = 0xBC;   // std frame, low prio
 static constexpr uint8_t  CEMI_CTRL2_GROUP_HC6 = 0xE0;   // 1xxxxxxx (group) + hop=6
 
 // KNX UDP RX buffer (routing frames are small; 512 is plenty)
@@ -161,7 +160,7 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   uint8_t cemi[64];
   uint8_t idx = 0;
 
-  const uint8_t msgCode   = CEMI_LDATA_REQ;
+  const uint8_t msgCode   = CEMI_LDATA_IND;
   const uint8_t addInfo   = 0x00;
   const uint8_t ctrl1     = CEMI_CTRL1_DEFAULT;
   const uint8_t ctrl2     = CEMI_CTRL2_GROUP_HC6;
@@ -211,8 +210,8 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   // data length = TPDU payload (bytes after TPDU[1]) + (potentially embedded 1bit in TPDU[1])
   // KNX "data length" is the number of bytes in the APDU (TPDU starting after the length byte).
   // We always include TPDU[0] and TPDU[1] inside that length.
-  uint8_t apduLenBytes = 2 + (oneBit ? 0 : asduLen);
-  cemi[idx++] = apduLenBytes;
+  uint8_t apduLenMinusTpdu0 = 1 + (oneBit ? 0 : asduLen);
+  cemi[idx++] = apduLenMinusTpdu0;
 
   // TPDU
   cemi[idx++] = tpdu0;
@@ -231,13 +230,13 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   // KNXnet/IP header (6 bytes)
   //  - header size (0x06)
   //  - protocol version (0x10)
-  //  - service type (hi, lo) = 0x0531 (Routing Request)
+  //  - service type (hi, lo) = 0x0530 (Routing Request)
   //  - total length (hi, lo) = 6 + cEMI length
   uint16_t totalLen = 6 + idx;
   frame[p++] = 0x06;
   frame[p++] = KNX_PROTOCOL_VERSION;
-  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_REQ >> 8);
-  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_REQ & 0xFF);
+  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND >> 8);
+  frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND & 0xFF);
   frame[p++] = (uint8_t)(totalLen >> 8);
   frame[p++] = (uint8_t)(totalLen & 0xFF);
 
@@ -296,7 +295,7 @@ if (headerSize != 0x06 || proto != KNX_PROTOCOL_VERSION) {
   uint8_t addInfo = cemi[1];
   (void)addInfo; // we don't use additional info (0 usually)
 
-  if (msgCode != CEMI_LDATA_IND && msgCode != CEMI_LDATA_REQ) {
+  if (msgCode != CEMI_LDATA_IND ) {
     // We only care about L_Data.ind/req on routing
     KNX_LOG("RX: msgCode=0x%02X not L_Data.(ind|req).", msgCode);
     return;
