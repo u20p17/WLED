@@ -25,6 +25,8 @@
 #include <errno.h>
 #include <map>
 #include <functional>
+#include <array>
+#include <unordered_map>
 
 #ifndef KNX_DEBUG
 #define KNX_DEBUG 1   // 1=enable Serial logs, 0=disable
@@ -118,6 +120,9 @@ public:
   // Optional: stop UDP
   void end();
 
+  // Re-apply IGMP membership and TX iface without tearing the socket down.
+  bool rejoinMulticast();
+
   // Individual address (PA), 0x0000 means "unspecified" (we don't enforce PA in IP mode,
   // but user code may want to keep it for consistency).
   void     setIndividualAddress(uint16_t pa) { _pa = pa; }
@@ -164,16 +169,44 @@ public:
   bool running() const { return _running; }
   void clearRegistrations();
 
+   void setCommunicationEnhancement(bool enable, uint8_t count = 3, uint16_t gapMs = 0, uint16_t dedupMs = 700) {
+    _enhanced = enable;
+    _enhancedSendCount = (count < 1) ? 1 : count;
+    _enhancedGapMs = gapMs;
+    _rxDedupWindowMs = dedupMs;
+  }
+
 
 private:
   // Internal dispatch
   void _handleIncoming(const uint8_t* buf, int len);
   bool _composeAndSendApci(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen);
 
-private:
+   // ===== Enhancement state =====
+  bool     _enhanced            = false;
+  uint8_t  _enhancedSendCount   = 1;      // 1 = no repetition
+  uint16_t _enhancedGapMs       = 0;      // spacing between repeats (0 = back-to-back)
+  uint16_t _rxDedupWindowMs     = 700;    // like Tasmota doc
+
+  // Seen-packet signature cache (tiny ring buffer)
+  struct RxSig { uint32_t sig; uint32_t ts; };
+  static constexpr size_t RXSIG_SLOTS = 8;
+  std::array<RxSig, RXSIG_SLOTS> _rxSeen{{}};
+  uint8_t _rxSeenIdx = 0;
+
+  // Per-GA last 1-bit value/time (for toggle throttling)
+  struct RxBitState { uint32_t ts; uint8_t v; };
+  std::unordered_map<uint16_t, RxBitState> _rxBitCache;
+
+  // quick 32-bit signature mixer for RX dedup
+  static inline uint32_t _mix32(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16; return x;
+  }
+
   int         _sock;      // raw UDP socket
   IPAddress   _maddr;     // multicast group address
   struct sockaddr_in _mcastAddr; // cached multicast sockaddr
+  in_addr _lastIfAddr;        // last interface address used for IGMP
   uint16_t    _pa;  // physical address (optional / informational)
   bool        _running;
 
@@ -202,6 +235,7 @@ inline KnxIpCore::KnxIpCore()
 , _txErrors(0)
 {
   memset(&_mcastAddr, 0, sizeof(_mcastAddr));
+  _lastIfAddr = {};
 }
 
 inline void KnxIpCore::addGroupObject(uint16_t ga, DptMain dpt, bool transmit, bool receive) {

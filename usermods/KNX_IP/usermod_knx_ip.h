@@ -50,6 +50,13 @@ public:
   uint16_t kelvinMin = 2700;
   uint16_t kelvinMax = 6500;
 
+  // in class KnxIpUsermod private/public fields (config)
+  bool     commEnhance        = true;   // Tasmota-style enhancement enable
+  uint8_t  commResends        = 3;      // how many total sends
+  uint16_t commResendGapMs    = 0;      // gap between repeats
+  uint16_t commRxDedupMs      = 700;    // duplicate window
+
+
   // --- Usermod API ---
   void setup();
   void loop();

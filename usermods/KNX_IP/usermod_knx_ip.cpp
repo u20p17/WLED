@@ -204,6 +204,12 @@ void KnxIpUsermod::setup() {
    
   }
 
+  // Apply Communication Enhancement to the core
+  KNX.setCommunicationEnhancement(commEnhance, commResends, commResendGapMs, commRxDedupMs);
+  Serial.printf("[KNX-UM] CommEnhance %s (resends=%u gapMs=%u dedupMs=%u)\n",
+                commEnhance ? "ON" : "OFF", commResends, commResendGapMs, commRxDedupMs);
+
+
   // Parse GA strings once
   GA_IN_PWR  = parseGA(gaInPower);
   GA_IN_BRI  = parseGA(gaInBri);
@@ -470,6 +476,24 @@ void KnxIpUsermod::loop() {
     }
   }
 
+  // Detect Wi-Fi IP changes and refresh IGMP membership without tearing socket down
+  static IPAddress _lastIpForKnx;
+  if (KNX.running()) {
+    IPAddress cur = WiFi.localIP();
+    if (cur && cur.toString() != String("0.0.0.0")) {
+      if (_lastIpForKnx != cur) {
+        Serial.printf("[KNX-UM] WiFi IP changed %s -> %s, refreshing KNX multicast membership...\n",
+                      _lastIpForKnx.toString().c_str(), cur.toString().c_str());
+        if (!KNX.rejoinMulticast()) {
+          // Fallback: hard restart the KNX socket if rejoin fails
+          KNX.end();
+          KNX.begin();
+        }
+        _lastIpForKnx = cur;
+      }
+    }
+  }
+
   KNX.loop();
 
   // Publish immediately when GUI changed brightness/power/CCT/RGBW (debounced)
@@ -569,6 +593,11 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   top["periodic_interval_ms"] = periodicIntervalMs;
   top["cct_kelvin_min"] = kelvinMin;
   top["cct_kelvin_max"] = kelvinMax;
+  top["comm_enhance"]      = commEnhance;
+  top["comm_resends"]      = commResends;
+  top["comm_resend_gap_ms"]= commResendGapMs;
+  top["comm_rx_dedup_ms"]  = commRxDedupMs;
+
 
   JsonObject gIn  = top.createNestedObject("GA in");
   gIn["power"]  = gaInPower;
@@ -610,6 +639,11 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   kelvinMax = top["cct_kelvin_max"] | kelvinMax;
   periodicEnabled    = top["periodic_enabled"]     | periodicEnabled;
   periodicIntervalMs = top["periodic_interval_ms"] | periodicIntervalMs;
+  commEnhance       = top["comm_enhance"]        | commEnhance;
+  commResends       = top["comm_resends"]        | commResends;
+  commResendGapMs   = top["comm_resend_gap_ms"]  | commResendGapMs;
+  commRxDedupMs     = top["comm_rx_dedup_ms"]    | commRxDedupMs;
+
 
   // 🔧 accept either "GA in"/"GA out" (what we save) or "in"/"out"
   JsonObject gIn  = top["GA in"];  if (gIn.isNull())  gIn  = top["in"];
@@ -643,54 +677,120 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
     strlcpy(gaOutPreset, gOut["preset"] | gaOutPreset, sizeof(gaOutPreset));
   }
 
-  txRateLimitMs = top["tx_rate_limit_ms"] | txRateLimitMs;
+   txRateLimitMs = top["tx_rate_limit_ms"] | txRateLimitMs;
 
-  // refresh parsed GA cache
-  GA_IN_PWR  = parseGA(gaInPower);
-  GA_IN_BRI  = parseGA(gaInBri);
-  GA_IN_R    = parseGA(gaInR);
-  GA_IN_G    = parseGA(gaInG);
-  GA_IN_B    = parseGA(gaInB);
-  GA_IN_W    = parseGA(gaInW);
-  GA_IN_CCT  = parseGA(gaInCct);
-  GA_IN_WW   = parseGA(gaInWW);
-  GA_IN_CW   = parseGA(gaInCW);
-  GA_IN_FX   = parseGA(gaInFx);
-  GA_IN_PRE  = parseGA(gaInPreset);
+  // --- decide if a rebuild is needed (compare new parsed GAs vs current cache) ---
+  // keep snapshots of previous caches before we overwrite them
+  const uint16_t PREV_IN_PWR = GA_IN_PWR, PREV_IN_BRI = GA_IN_BRI, PREV_IN_R = GA_IN_R,
+                 PREV_IN_G = GA_IN_G, PREV_IN_B = GA_IN_B, PREV_IN_W = GA_IN_W,
+                 PREV_IN_CCT = GA_IN_CCT, PREV_IN_WW = GA_IN_WW, PREV_IN_CW = GA_IN_CW,
+                 PREV_IN_FX = GA_IN_FX, PREV_IN_PRE = GA_IN_PRE;
 
-  GA_OUT_PWR = parseGA(gaOutPower);
-  GA_OUT_BRI = parseGA(gaOutBri);
-  GA_OUT_R   = parseGA(gaOutR);
-  GA_OUT_G   = parseGA(gaOutG);
-  GA_OUT_B   = parseGA(gaOutB);
-  GA_OUT_W   = parseGA(gaOutW);
-  GA_OUT_CCT = parseGA(gaOutCct);
-  GA_OUT_WW  = parseGA(gaOutWW);
-  GA_OUT_CW  = parseGA(gaOutCW);
-  GA_OUT_FX  = parseGA(gaOutFx);
-  GA_OUT_PRE = parseGA(gaOutPreset);
-  // --- Apply at runtime (no reboot required) ---
-  if (enabled) {
-    // Update PA immediately if the string is valid
-    if (uint16_t pa = parsePA(individualAddr)) {
-      KNX.setIndividualAddress(pa);
-      Serial.printf("[KNX-UM] PA set to %u.%u.%u (0x%04X)\n",
-                    (unsigned)((pa>>12)&0x0F), (unsigned)((pa>>8)&0x0F), (unsigned)(pa&0xFF), pa);
-    } else {
-      Serial.println("[KNX-UM] WARNING: Invalid individual address string; PA not changed.");
+  const uint16_t PREV_OUT_PWR = GA_OUT_PWR, PREV_OUT_BRI = GA_OUT_BRI, PREV_OUT_R = GA_OUT_R,
+                 PREV_OUT_G = GA_OUT_G, PREV_OUT_B = GA_OUT_B, PREV_OUT_W = GA_OUT_W,
+                 PREV_OUT_CCT = GA_OUT_CCT, PREV_OUT_WW = GA_OUT_WW, PREV_OUT_CW = GA_OUT_CW,
+                 PREV_OUT_FX = GA_OUT_FX, PREV_OUT_PRE = GA_OUT_PRE;
+
+  // parse the just-loaded GA strings into NEW values (locals)
+  const uint16_t NEW_IN_PWR = parseGA(gaInPower);
+  const uint16_t NEW_IN_BRI = parseGA(gaInBri);
+  const uint16_t NEW_IN_R   = parseGA(gaInR);
+  const uint16_t NEW_IN_G   = parseGA(gaInG);
+  const uint16_t NEW_IN_B   = parseGA(gaInB);
+  const uint16_t NEW_IN_W   = parseGA(gaInW);
+  const uint16_t NEW_IN_CCT = parseGA(gaInCct);
+  const uint16_t NEW_IN_WW  = parseGA(gaInWW);
+  const uint16_t NEW_IN_CW  = parseGA(gaInCW);
+  const uint16_t NEW_IN_FX  = parseGA(gaInFx);
+  const uint16_t NEW_IN_PRE = parseGA(gaInPreset);
+
+  const uint16_t NEW_OUT_PWR = parseGA(gaOutPower);
+  const uint16_t NEW_OUT_BRI = parseGA(gaOutBri);
+  const uint16_t NEW_OUT_R   = parseGA(gaOutR);
+  const uint16_t NEW_OUT_G   = parseGA(gaOutG);
+  const uint16_t NEW_OUT_B   = parseGA(gaOutB);
+  const uint16_t NEW_OUT_W   = parseGA(gaOutW);
+  const uint16_t NEW_OUT_CCT = parseGA(gaOutCct);
+  const uint16_t NEW_OUT_WW  = parseGA(gaOutWW);
+  const uint16_t NEW_OUT_CW  = parseGA(gaOutCW);
+  const uint16_t NEW_OUT_FX  = parseGA(gaOutFx);
+  const uint16_t NEW_OUT_PRE = parseGA(gaOutPreset);
+
+  // compute rebuild need (any GA mapping changed OR KNX just got enabled)
+  bool anyGAChanged =
+      (NEW_IN_PWR != PREV_IN_PWR) || (NEW_IN_BRI != PREV_IN_BRI) || (NEW_IN_R != PREV_IN_R) ||
+      (NEW_IN_G  != PREV_IN_G ) || (NEW_IN_B   != PREV_IN_B ) || (NEW_IN_W  != PREV_IN_W ) ||
+      (NEW_IN_CCT!= PREV_IN_CCT) || (NEW_IN_WW != PREV_IN_WW) || (NEW_IN_CW != PREV_IN_CW) ||
+      (NEW_IN_FX != PREV_IN_FX) || (NEW_IN_PRE != PREV_IN_PRE) ||
+      (NEW_OUT_PWR!=PREV_OUT_PWR)||(NEW_OUT_BRI!=PREV_OUT_BRI)||(NEW_OUT_R!=PREV_OUT_R) ||
+      (NEW_OUT_G != PREV_OUT_G ) || (NEW_OUT_B  != PREV_OUT_B ) || (NEW_OUT_W != PREV_OUT_W) ||
+      (NEW_OUT_CCT!=PREV_OUT_CCT)||(NEW_OUT_WW != PREV_OUT_WW)||(NEW_OUT_CW!=PREV_OUT_CW) ||
+      (NEW_OUT_FX != PREV_OUT_FX) || (NEW_OUT_PRE!=PREV_OUT_PRE);
+
+  bool prevEnabled = KNX.running();  // current runtime state is a good proxy here
+
+  // now update the global caches with the NEW values
+  GA_IN_PWR  = NEW_IN_PWR;  GA_IN_BRI = NEW_IN_BRI; GA_IN_R = NEW_IN_R; GA_IN_G = NEW_IN_G;
+  GA_IN_B    = NEW_IN_B;    GA_IN_W   = NEW_IN_W;   GA_IN_CCT = NEW_IN_CCT; GA_IN_WW = NEW_IN_WW;
+  GA_IN_CW   = NEW_IN_CW;   GA_IN_FX  = NEW_IN_FX;  GA_IN_PRE = NEW_IN_PRE;
+
+  GA_OUT_PWR = NEW_OUT_PWR; GA_OUT_BRI = NEW_OUT_BRI; GA_OUT_R = NEW_OUT_R; GA_OUT_G = NEW_OUT_G;
+  GA_OUT_B   = NEW_OUT_B;   GA_OUT_W   = NEW_OUT_W;   GA_OUT_CCT = NEW_OUT_CCT; GA_OUT_WW = NEW_OUT_WW;
+  GA_OUT_CW  = NEW_OUT_CW;  GA_OUT_FX  = NEW_OUT_FX;  GA_OUT_PRE = NEW_OUT_PRE;
+
+  // Re-apply enhancement to running core (safe to do regardless)
+  KNX.setCommunicationEnhancement(commEnhance, commResends, commResendGapMs, commRxDedupMs);  // :contentReference[oaicite:0]{index=0}
+
+  // ---- ENABLED/OFF handling ----
+  if (!enabled) {
+    // GUI disabled → leave multicast + free socket if running
+    if (KNX.running()) {
+      Serial.println("[KNX-UM] KNX disabled via GUI → shutting down.");
+      KNX.end();                                                   // leaves group and closes socket :contentReference[oaicite:1]{index=1}
     }
+    return true;
+  }
 
-    // Tear down current KNX + registrations and rebuild
+  // If PA string is valid, update it without forcing a rebuild
+  if (uint16_t pa = parsePA(individualAddr)) {                     // :contentReference[oaicite:2]{index=2}
+    KNX.setIndividualAddress(pa);
+    Serial.printf("[KNX-UM] PA set to %u.%u.%u (0x%04X)\n",
+                  (unsigned)((pa>>12)&0x0F), (unsigned)((pa>>8)&0x0F), (unsigned)(pa&0xFF), pa);
+  } else {
+    Serial.println("[KNX-UM] WARNING: Invalid individual address string; PA not changed.");
+  }
+
+  // ---- rebuild vs. tweak ----
+  const bool rebuildNeeded = anyGAChanged || !prevEnabled;
+
+  if (rebuildNeeded) {
+    Serial.println("[KNX-UM] Rebuild KNX registrations & socket (GA map changed or first enable).");
     KNX.end();
-    KNX.clearRegistrations();
+    KNX.clearRegistrations();                                      // drop old GA registry
+    setup();                                                       // re-register + begin() if Wi-Fi up :contentReference[oaicite:3]{index=3}
+    KNX.setCommunicationEnhancement(commEnhance, commResends, commResendGapMs, commRxDedupMs);
 
-    // Re-register all GAs and callbacks just like in setup()
-    // (reuse the same code path to avoid drift)
-    setup();
-
-    // Optional: push a fresh state snapshot (power/brightness/effect/colors)
-    // so KNX side sees the new GA mapping immediately.
+    if (KNX.running()) {
+      // Optional: send a primer read so routers learn our presence
+      uint16_t primer = knxMakeGroupAddress(0,0,1);
+      KNX.groupValueRead(primer);
+    }
+    // Push state so KNX sees the new mapping
     scheduleStatePublish(true, true, true);
+  } else {
+    // Lightweight path: keep socket, just refresh IGMP and tweak runtime
+    if (KNX.running()) {
+      if (!KNX.rejoinMulticast()) {                                // refresh IP_ADD_MEMBERSHIP + MULTICAST_IF :contentReference[oaicite:4]{index=4}
+        KNX.end();
+        KNX.begin();
+      }
+      // Optional primer
+      uint16_t primer = knxMakeGroupAddress(0,0,1);
+      KNX.groupValueRead(primer);
+    } else {
+      // Enabled but not running yet (e.g., Wi-Fi not ready) → try to start
+      KNX.begin();                                                 // joins multicast, sets TTL/LOOP/IF :contentReference[oaicite:5]{index=5}
+    }
   }
   return true;
 }

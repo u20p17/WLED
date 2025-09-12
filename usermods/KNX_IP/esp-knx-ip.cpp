@@ -59,11 +59,12 @@ bool KnxIpCore::begin() {
 
 in_addr maddr{};        maddr.s_addr = inet_addr("224.0.23.12");        // KNX group
 in_addr ifaddr{};       ifaddr.s_addr = inet_addr(WiFi.localIP().toString().c_str());
+_lastIfAddr = ifaddr;
 
 // Join multicast group on all interfaces (or use ifaddr here if you prefer)
 ip_mreq mreq{}; 
 mreq.imr_multiaddr = maddr;
-mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+mreq.imr_interface = ifaddr;
 if (::setsockopt(_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
   _rxErrors++; KNX_LOG("begin(): IP_ADD_MEMBERSHIP failed errno=%d", errno);
 }
@@ -95,6 +96,49 @@ void KnxIpCore::end() {
   if (!_running) return;
   if (_sock >= 0) { ::close(_sock); _sock = -1; }
   _running = false;
+}
+
+bool KnxIpCore::rejoinMulticast() {
+  if (!_running || _sock < 0) {
+    KNX_LOG("rejoinMulticast(): core not running.");
+    return false;
+  }
+
+  in_addr maddr{};  inet_aton("224.0.23.12", &maddr);
+  in_addr ifaddr{}; inet_aton(WiFi.localIP().toString().c_str(), &ifaddr);
+
+  // If interface changed, drop old membership first to avoid stale IGMP state
+  if (_lastIfAddr.s_addr != 0 && _lastIfAddr.s_addr != ifaddr.s_addr) {
+    ip_mreq drop{};
+    drop.imr_multiaddr = maddr;
+    drop.imr_interface = _lastIfAddr;
+    (void)::setsockopt(_sock, IPPROTO_IP, IP_DROP_MEMBERSHIP, &drop, sizeof(drop));
+  }
+
+  // (Re)join multicast group on current interface
+  ip_mreq mreq{};
+  mreq.imr_multiaddr = maddr;
+  mreq.imr_interface = ifaddr;
+  if (::setsockopt(_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+    KNX_LOG("rejoinMulticast(): IP_ADD_MEMBERSHIP failed errno=%d", errno);
+    return false;
+  }
+
+  // Re-apply multicast socket options that some stacks reset
+  uint8_t ttl = 1;  (void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_TTL,  &ttl,  sizeof(ttl));
+  uint8_t loop = 1; (void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof(loop));
+ 
+
+  // Pin outgoing multicast to Wi-Fi STA again (some drivers reset on config changes)
+  if (::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr)) < 0) {
+    KNX_LOG("rejoinMulticast(): IP_MULTICAST_IF failed errno=%d", errno);
+    // not fatal – continue
+  }
+  _lastIfAddr = ifaddr;
+
+  KNX_LOG("rejoinMulticast(): refreshed membership for 224.0.23.12 on %s",
+          WiFi.localIP().toString().c_str());
+  return true;
 }
 
 void KnxIpCore::loop() {
@@ -132,129 +176,93 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
     return false;
   }
 
-  // Build cEMI L_Data.req
-  // cEMI format (for L_Data.req / L_Data.ind):
-  // [0]  msgCode
-  // [1]  addInfoLen
-  // [2]  ctrl1
-  // [3]  ctrl2
-  // [4]  src addr (hi)
-  // [5]  src addr (lo)
-  // [6]  dst addr (hi)
-  // [7]  dst addr (lo)
-  // [8]  data length (ASDU length in bytes)
-  // [9..] TPDU (starts with 2 bytes: TPCI/APCI + data)
-  //
-  // For GroupValue*:
-  //  APCI is 4 bits: bits [1:0] of TPDU[0] and bits [7:6] of TPDU[1]
-  //  We send unnumbered data group: TPDU[0] low 2 bits = 0b00 (so TPDU[0]=0)
-  //
-  //  If ASDU is 1 byte for 1-bit DPT:
-  //    - Put the data bit (bit0) into TPDU[1] low bit, along with APCI high bits.
-  //    - No further ASDU bytes follow.
-  //
-  //  For multi-byte ASDU:
-  //    - TPDU[1] holds only APCI high bits (data bits = 0)
-  //    - Then append 'asduLen' bytes.
-
-  uint8_t cemi[64];
-  uint8_t idx = 0;
-
-  const uint8_t msgCode   = CEMI_LDATA_IND;
-  const uint8_t addInfo   = 0x00;
-  const uint8_t ctrl1     = CEMI_CTRL1_DEFAULT;
-  const uint8_t ctrl2     = CEMI_CTRL2_GROUP_HC6;
-  const uint16_t srcAddr  = _pa; // if 0, still acceptable in IP routing context
-
-  KNX_LOG("TX: GA=%u/%u/%u (0x%04X) svc=%u asduLen=%u srcPA=%u.%u.%u",
-          knxGaMain(ga), knxGaMiddle(ga), knxGaSub(ga), ga, (unsigned)svc, (unsigned)asduLen,
-          (unsigned)((_pa>>12)&0x0F), (unsigned)((_pa>>8)&0x0F), (unsigned)(_pa&0xFF));
-
+  // ---- decide true 1-bit telegram by DPT, not by len ----
   bool oneBit = false;
   auto it = _gos.find(ga);
   if (it != _gos.end()) {
     oneBit = (it->second.dpt == DptMain::DPT_1xx);
   } else {
-    // Fallback if GA wasn't registered: assume NOT 1-bit
+    // if GA unknown, be conservative: treat as multi-byte (no embedded bit)
     oneBit = false;
   }
 
+  // Read has no ASDU
   if (svc == KnxService::GroupValue_Read) {
-  asdu = nullptr;
-  asduLen = 0;
-  // oneBit stays as determined; it won’t matter because no data follows.
+    asdu = nullptr;
+    asduLen = 0;
   }
 
-  // Compose TPDU header:
-  uint8_t tpdu0 = 0x00; // unnumbered data group (low 2 bits = 0)
-  uint8_t tpdu1 = 0x00;
+  // ---- build cEMI L_Data.ind ----
+  uint8_t cemi[64];
+  uint8_t idx = 0;
 
-  uint8_t apci2bits = 0; // top 2 bits of TPDU[1]
-  switch (svc) {
-    case KnxService::GroupValue_Read:     apci2bits = 0b00; break; // APCI 0x0
-    case KnxService::GroupValue_Response: apci2bits = 0b01; break; // APCI 0x1
-    case KnxService::GroupValue_Write:    apci2bits = 0b10; break; // APCI 0x2
-  }
-  tpdu1 = (uint8_t)(apci2bits << 6);
+  const uint8_t msgCode = CEMI_LDATA_IND;
+  const uint8_t addInfo = 0x00;
 
-  // Start cEMI
   cemi[idx++] = msgCode;
   cemi[idx++] = addInfo;
-  cemi[idx++] = ctrl1;
-  cemi[idx++] = ctrl2;
-  cemi[idx++] = (uint8_t)(srcAddr >> 8);
-  cemi[idx++] = (uint8_t)(srcAddr & 0xFF);
+  cemi[idx++] = CEMI_CTRL1_DEFAULT;   // 0xBC
+  cemi[idx++] = CEMI_CTRL2_GROUP_HC6; // 0xE0
+  cemi[idx++] = (uint8_t)(_pa >> 8);
+  cemi[idx++] = (uint8_t)(_pa & 0xFF);
   cemi[idx++] = (uint8_t)(ga >> 8);
   cemi[idx++] = (uint8_t)(ga & 0xFF);
 
-  // data length = TPDU payload (bytes after TPDU[1]) + (potentially embedded 1bit in TPDU[1])
-  // KNX "data length" is the number of bytes in the APDU (TPDU starting after the length byte).
-  // We always include TPDU[0] and TPDU[1] inside that length.
-  uint8_t apduLenMinusTpdu0 = 1 + (oneBit ? 0 : asduLen);
-  cemi[idx++] = apduLenMinusTpdu0;
+  // TPDU header
+  const uint8_t tpdu0 = 0x00; // UDT group
+  uint8_t tpdu1 = 0x00;
+  switch (svc) {
+    case KnxService::GroupValue_Read:     tpdu1 = (0b00 << 6); break;
+    case KnxService::GroupValue_Response: tpdu1 = (0b01 << 6); break;
+    case KnxService::GroupValue_Write:    tpdu1 = (0b10 << 6); break;
+  }
 
-  // TPDU
+  // APDU bytes (incl. TPDU0 + TPDU1 + payload); cEMI "length" is APDU-1
+  const uint8_t apduBytes = oneBit ? 2 : (uint8_t)(2 + asduLen);
+  cemi[idx++] = (uint8_t)(apduBytes - 1);
+
+  // Write TPDU and payload
   cemi[idx++] = tpdu0;
   if (oneBit && asdu) {
-    uint8_t bit = (asdu[0] & 0x01);
+    // embed the bit into TPDU[1] LSB (only for DPT_1xx)
+    const uint8_t bit = (asdu[0] & 0x01);
     cemi[idx++] = (uint8_t)(tpdu1 | bit);
   } else {
+    // multi-byte payload (or read/unknown GA)
     cemi[idx++] = tpdu1;
     for (uint8_t i = 0; i < asduLen; ++i) cemi[idx++] = asdu[i];
   }
 
-  // Now wrap cEMI inside KNXnet/IP Routing Request
-  uint8_t frame[96];
-  uint8_t p = 0;
+  // ---- KNXnet/IP routing wrapper ----
+  uint8_t frame[96]; uint8_t p = 0;
+  const uint16_t totalLen = (uint16_t)(6 + idx);
 
-  // KNXnet/IP header (6 bytes)
-  //  - header size (0x06)
-  //  - protocol version (0x10)
-  //  - service type (hi, lo) = 0x0530 (Routing Request)
-  //  - total length (hi, lo) = 6 + cEMI length
-  uint16_t totalLen = 6 + idx;
-  frame[p++] = 0x06;
-  frame[p++] = KNX_PROTOCOL_VERSION;
+  frame[p++] = 0x06;                               // header size
+  frame[p++] = KNX_PROTOCOL_VERSION;               // 0x10
   frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND >> 8);
   frame[p++] = (uint8_t)(KNX_SVC_ROUTING_IND & 0xFF);
   frame[p++] = (uint8_t)(totalLen >> 8);
   frame[p++] = (uint8_t)(totalLen & 0xFF);
 
-  // cEMI payload
   for (uint8_t i = 0; i < idx; ++i) frame[p++] = cemi[i];
 
-  // debug: dump the whole KNXnet/IP Routing Request we're about to send
+  // debug (optional)
   knx_dump_hex("TX frame", frame, p);
 
-  // ===== Send to 224.0.23.12:3671 =====
-  ssize_t sent = ::sendto(_sock, frame, p, 0, (struct sockaddr*)&_mcastAddr, sizeof(_mcastAddr));
-  if (sent != p) {
-    _txErrors++;
-    KNX_LOG("TX: sendto()=%d/%d errno=%d txErrors=%u", (int)sent, p, errno, (unsigned)_txErrors);
-    return false;
+  // ---- send to 224.0.23.12:3671 ----
+  // Tasmota-style redundancy: send the same frame multiple times if enabled
+  const uint8_t repeats = _enhanced ? _enhancedSendCount : 1;
+  for (uint8_t i = 0; i < repeats; ++i) {
+    ssize_t sent = ::sendto(_sock, frame, p, 0, (struct sockaddr*)&_mcastAddr, sizeof(_mcastAddr));
+    if (sent != p) {
+      _txErrors++;
+      KNX_LOG("TX: sendto()=%d/%d errno=%d txErrors=%u", (int)sent, p, errno, (unsigned)_txErrors);
+      return false;
+    }
+    _txPackets++;
+    KNX_LOG("TX: sent %d bytes rpt=%u/%u (txPackets=%u)", p, (unsigned)(i+1), (unsigned)repeats, (unsigned)_txPackets);
+    if (_enhancedGapMs) delay(_enhancedGapMs);
   }
-  KNX_LOG("TX: sent %d bytes (txPackets=%u)", p, (unsigned)(_txPackets+1));
-  _txPackets++;
   return true;
 }
 
@@ -264,107 +272,133 @@ void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
   // Validate KNXnet/IP header (min 6 bytes)
   if (len < 6) { _rxErrors++; KNX_LOG("RX: too short (%d).", len); return; }
 
-  uint8_t  headerSize  = buf[0];
-  uint8_t  proto       = buf[1];
-  uint16_t svc         = (uint16_t(buf[2]) << 8) | buf[3];
-  uint16_t totalLen    = (uint16_t(buf[4]) << 8) | buf[5];
+  const uint8_t  headerSize = buf[0];
+  const uint8_t  proto      = buf[1];
+  const uint16_t svc        = (uint16_t(buf[2]) << 8) | buf[3];
+  const uint16_t totalLen   = (uint16_t(buf[4]) << 8) | buf[5];
 
-if (headerSize != 0x06 || proto != KNX_PROTOCOL_VERSION) {
+  if (headerSize != 0x06 || proto != KNX_PROTOCOL_VERSION) {
     _rxErrors++; KNX_LOG("RX: bad header: size=0x%02X proto=0x%02X.", headerSize, proto); return;
   }
   if (totalLen != len) {
-    // Some stacks pad UDP; be lenient if totalLen <= len
     if (totalLen > len) { _rxErrors++; KNX_LOG("RX: totalLen(%u)>len(%d).", (unsigned)totalLen, len); return; }
   }
 
-  // Routing Indication frames carry cEMI
+  // Only Routing Indication carries cEMI
   if (svc != KNX_SVC_ROUTING_IND) {
-    // ignore other services (search response, tunneling, etc.)
     KNX_LOG("RX: ignore svc=0x%04X (not Routing_Ind).", (unsigned)svc);
     return;
   }
 
-  // cEMI starts after 6 bytes
-  if (len < 6 + 10) { // minimal cEMI header size check
-    _rxErrors++; KNX_LOG("RX: cEMI too short (len=%d).", len); return;
-  }
+  if (len < 6 + 10) { _rxErrors++; KNX_LOG("RX: cEMI too short (len=%d).", len); return; }
+
   const uint8_t* cemi = buf + 6;
-  int cemiLen = len - 6;
+  const int      cemiLen = len - 6;
 
-  uint8_t msgCode = cemi[0];
-  uint8_t addInfo = cemi[1];
-  (void)addInfo; // we don't use additional info (0 usually)
+  const uint8_t msgCode = cemi[0];
+  const uint8_t addInfo = cemi[1]; (void)addInfo;
 
-  if (msgCode != CEMI_LDATA_IND ) {
-    // We only care about L_Data.ind/req on routing
-    KNX_LOG("RX: msgCode=0x%02X not L_Data.(ind|req).", msgCode);
+  if (msgCode != CEMI_LDATA_IND) {
+    KNX_LOG("RX: msgCode=0x%02X not L_Data.ind.", msgCode);
     return;
   }
-
   if (cemiLen < 10) { _rxErrors++; KNX_LOG("RX: cEMI header truncated (cemiLen=%d).", cemiLen); return; }
 
-  uint8_t ctrl1 = cemi[2];
-  uint8_t ctrl2 = cemi[3];
-  (void)ctrl1; (void)ctrl2;
+  const uint8_t ctrl1 = cemi[2];
+  const uint8_t ctrl2 = cemi[3];
+  (void)ctrl1;
 
-  uint16_t src  = (uint16_t(cemi[4]) << 8) | cemi[5];
-  uint16_t dst  = (uint16_t(cemi[6]) << 8) | cemi[7];
+  const uint16_t src = (uint16_t(cemi[4]) << 8) | cemi[5];
+  const uint16_t dst = (uint16_t(cemi[6]) << 8) | cemi[7];
 
-  uint8_t apduLen = cemi[8]; // includes TPDU[0] and TPDU[1] and any data bytes
+  // cEMI [8] = APDU length minus 1
+  const uint8_t apduLenMinus1 = cemi[8];
+  const uint8_t apduBytes     = uint8_t(apduLenMinus1 + 1); // TPDU0+TPDU1+payload
 
   // TPDU starts at cemi[9]
-  if (cemiLen < 9 + apduLen) { _rxErrors++; return; }
+  if (cemiLen < 9 + apduBytes) { _rxErrors++; KNX_LOG("RX: TPDU truncated (need %u, have %d).", (unsigned)apduBytes, cemiLen - 9); return; }
   const uint8_t* tpdu = cemi + 9;
-  if (apduLen < 2) { _rxErrors++; return; } // must have at least TPDU[0] + TPDU[1]
+  if (apduBytes < 2) { _rxErrors++; KNX_LOG("RX: APDU < 2 bytes."); return; }
 
-  // Destination type: group if ctrl2 bit7 == 1
-  bool isGroup = (ctrl2 & 0x80) != 0;
+  // Must be group address (ctrl2 bit7)
+  const bool isGroup = (ctrl2 & 0x80) != 0;
   if (!isGroup) {
-    // Not a group address -> ignore for our API
     KNX_LOG("RX: dst=0x%04X not group (ctrl2=0x%02X).", dst, ctrl2);
     return;
   }
 
-  // Extract APCI (4 bits): [TPDU0:1:0]<<2 | [TPDU1:7:6]
-  uint8_t apci4 = ((tpdu[0] & 0x03) << 2) | ((tpdu[1] & 0xC0) >> 6);
+  // Drop our own multicast (mirrored GA protection)
+  if (src == _pa && _pa != 0) {
+    KNX_LOG("RX: own frame (src=%u.%u.%u) ignored.",
+      (unsigned)((src>>12)&0x0F), (unsigned)((src>>8)&0x0F), (unsigned)(src&0xFF));
+    return;
+  }
+
+  // ---------- APCI & service ----------
+  const uint8_t apci4 = uint8_t(((tpdu[0] & 0x03) << 2) | ((tpdu[1] & 0xC0) >> 6));
   KnxService svcDetected;
   switch (apci4) {
-    case 0x0: svcDetected = KnxService::GroupValue_Read; break;
+    case 0x0: svcDetected = KnxService::GroupValue_Read;     break;
     case 0x1: svcDetected = KnxService::GroupValue_Response; break;
-    case 0x2: svcDetected = KnxService::GroupValue_Write; break;
+    case 0x2: svcDetected = KnxService::GroupValue_Write;    break;
     default:
-      // other APCIs (A/B writing, memory read/write, etc.) not handled here
       KNX_LOG("RX: APCI=0x%X not handled.", apci4);
       return;
   }
 
-  // Determine ASDU bytes (after the two TPDU header bytes)
-  const uint8_t* asdu = nullptr;
-  uint8_t asduLen = 0;
+  // ---------- ASDU extraction ----------
+  const uint8_t* asdu  = nullptr;
+  uint8_t        asduLen = 0;
 
-  if (svcDetected == KnxService::GroupValue_Write && apduLen == 2) {
-    // 1-bit write, data in TPDU[1] bit0
+  if (svcDetected == KnxService::GroupValue_Write && apduBytes == 2) {
     static uint8_t one;
     one = (tpdu[1] & 0x01);
-    asdu = &one;
-    asduLen = 1;
-  } else {
-    // multi-byte payload: TPDU[2..]
-    if (apduLen > 2) {
-      asdu = tpdu + 2;
-      asduLen = apduLen - 2;
-    } else {
-      asdu = nullptr;
-      asduLen = 0;
+    asdu = &one; asduLen = 1;
+  } else if (apduBytes > 2) {
+    asdu = tpdu + 2; asduLen = uint8_t(apduBytes - 2);
+  }
+
+  KNX_LOG("RX: src=%u.%u.%u dst=%u/%u/%u (0x%04X) apduBytes=%u svc=%u lenASDU=%u",
+          (unsigned)((src>>12)&0x0F), (unsigned)((src>>8)&0x0F), (unsigned)(src&0xFF),
+          knxGaMain(dst), knxGaMiddle(dst), knxGaSub(dst), dst,
+          (unsigned)apduBytes, (unsigned)svcDetected, (unsigned)asduLen);
+
+  // ---------- Communication enhancement: RX de-dup + toggle throttle ----------
+  if (_enhanced) {
+    const uint32_t now = millis();
+
+    // Build a small signature across src, dst, apci, and up to 4 bytes of payload
+    uint32_t sig = ((uint32_t)src << 16) ^ (uint32_t)dst ^ ((uint32_t)apci4 << 28);
+    if (asdu && asduLen) {
+      uint32_t d = 0; memcpy(&d, asdu, (asduLen >= 4 ? 4 : asduLen));
+      sig ^= _mix32(d + ((uint32_t)asduLen << 24));
+    }
+    sig = _mix32(sig);
+
+    // Deduplicate within window
+    for (size_t i = 0; i < _rxSeen.size(); ++i) {
+      const RxSig &r = _rxSeen[i];
+      if (r.sig == sig && (now - r.ts) <= _rxDedupWindowMs) {
+        KNX_LOG("RX: duplicate suppressed (sig=0x%08X, %ums)", (unsigned)sig, (unsigned)(now - r.ts));
+        return;
+      }
+    }
+    _rxSeen[_rxSeenIdx] = RxSig{sig, now};
+    _rxSeenIdx = (_rxSeenIdx + 1) % _rxSeen.size();
+
+    // Toggle throttling for 1-bit writes (ignore second toggle <1s)
+    if (svcDetected == KnxService::GroupValue_Write && asdu && asduLen == 1) {
+      const uint8_t bit = (asdu[0] & 0x01);
+      auto &st = _rxBitCache[dst];
+      if (st.ts != 0 && (now - st.ts) < 1000 && st.v != bit) {
+        KNX_LOG("RX: toggle throttled on GA 0x%04X (%u->%u in %u ms)", dst, st.v, bit, (unsigned)(now - st.ts));
+        return;
+      }
+      st.v = bit; st.ts = now;
     }
   }
 
-  // If we have a registered group object & callback, dispatch
-  
-  KNX_LOG("RX: src=%u.%u.%u dst=%u/%u/%u (0x%04X) apduLen=%u svc=%u lenASDU=%u",
-          (unsigned)((src>>12)&0x0F), (unsigned)((src>>8)&0x0F), (unsigned)(src&0xFF),
-          knxGaMain(dst), knxGaMiddle(dst), knxGaSub(dst), dst, (unsigned)apduLen, (unsigned)svcDetected, (unsigned)asduLen);
-
+  // ---------- Dispatch ----------
   auto itGo = _gos.find(dst);
   if (itGo != _gos.end()) {
     DptMain dpt = itGo->second.dpt;
@@ -377,10 +411,10 @@ if (headerSize != 0x06 || proto != KNX_PROTOCOL_VERSION) {
     KNX_LOG("RX: no registered GA for 0x%04X.", dst);
   }
 
-  (void)src; // available if you want to use/forward it
   _rxPackets++;
   KNX_LOG("RX: done (rxPackets=%u).", (unsigned)_rxPackets);
 }
+
 
 
 // ======== Compose and send APCI ========
