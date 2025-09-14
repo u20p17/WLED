@@ -1,4 +1,30 @@
 #include "usermod_knx_ip.h"
+#include "wled.h"   // access to global 'strip' and segments
+
+enum class LedProfile : uint8_t { MONO = 1, CCT, RGB, RGBW, RGBCCT };
+static LedProfile g_ledProfile = LedProfile::RGB;
+
+// Map segment light-capabilities to profile.
+// lc bit0=RGB (1), bit1=White (2), bit2=CCT (4)
+static LedProfile detectLedProfileFromSegments() {
+  uint8_t lc = 0;
+  const uint16_t n = strip.getSegmentsNum();
+  for (uint16_t i = 0; i < n; i++) {
+    lc |= strip.getSegment(i).getLightCapabilities();
+  }
+  if (lc == 0 && n > 0) lc = strip.getMainSegment().getLightCapabilities(); // fallback
+
+  const bool hasRGB = lc & 0x01;
+  const bool hasW   = lc & 0x02;
+  const bool hasCCT = lc & 0x04;
+
+  if (hasRGB && hasCCT) return LedProfile::RGBCCT;
+  if (hasRGB && hasW)   return LedProfile::RGBW;
+  if (hasRGB)           return LedProfile::RGB;
+  if (hasCCT)           return LedProfile::CCT;
+  if (hasW)             return LedProfile::MONO;
+  return LedProfile::MONO;
+}
 
 // ---- Cached parsed GAs (uint16_t) ----
 namespace {
@@ -7,17 +33,26 @@ namespace {
   uint16_t GA_IN_R    = 0;
   uint16_t GA_IN_G    = 0;
   uint16_t GA_IN_B    = 0;
+  uint16_t GA_IN_W    = 0;
+  uint16_t GA_IN_CCT  = 0;
+  uint16_t GA_IN_WW   = 0;
+  uint16_t GA_IN_CW   = 0;
   uint16_t GA_IN_FX   = 0;
   uint16_t GA_IN_PRE  = 0;
 
   uint16_t GA_OUT_PWR = 0;
   uint16_t GA_OUT_BRI = 0;
-  uint16_t GA_OUT_FX  = 0;
   uint16_t GA_OUT_R   = 0;
   uint16_t GA_OUT_G   = 0;
   uint16_t GA_OUT_B   = 0;
+  uint16_t GA_OUT_W   = 0;
+  uint16_t GA_OUT_CCT = 0;
+  uint16_t GA_OUT_WW  = 0;
+  uint16_t GA_OUT_CW  = 0;
+  uint16_t GA_OUT_FX  = 0;
   uint16_t GA_OUT_PRE = 0;
 }
+
 // Track last-sent preset so we only transmit GA_OUT_PRE when it changes
 static uint8_t s_lastPresetSent = 0xFF;
 
@@ -207,10 +242,9 @@ void KnxIpUsermod::setup() {
   // Apply Communication Enhancement to the core
   KNX.setCommunicationEnhancement(commEnhance, commResends, commResendGapMs, commRxDedupMs);
   Serial.printf("[KNX-UM] CommEnhance %s (resends=%u gapMs=%u dedupMs=%u)\n",
-                commEnhance ? "ON" : "OFF", commResends, commResendGapMs, commRxDedupMs);
+                commEnhance?"ON":"OFF", commResends, commResendGapMs, commRxDedupMs);
 
-
-  // Parse GA strings once
+  // Parse IN GA strings (always)
   GA_IN_PWR  = parseGA(gaInPower);
   GA_IN_BRI  = parseGA(gaInBri);
   GA_IN_R    = parseGA(gaInR);
@@ -220,8 +254,24 @@ void KnxIpUsermod::setup() {
   GA_IN_PRE  = parseGA(gaInPreset);
   Serial.printf("[KNX-UM] IN  pwr=0x%04X bri=0x%04X R=0x%04X G=0x%04X B=0x%04X fx=0x%04X pre=0x%04X\n",
                 GA_IN_PWR, GA_IN_BRI, GA_IN_R, GA_IN_G, GA_IN_B, GA_IN_FX, GA_IN_PRE);
- 
 
+  // --- LED capability detect & gate inputs ---
+  g_ledProfile = detectLedProfileFromSegments();
+  bool allowRGB = (g_ledProfile == LedProfile::RGB || g_ledProfile == LedProfile::RGBW || g_ledProfile == LedProfile::RGBCCT);
+  bool allowW   = (g_ledProfile == LedProfile::RGBW || g_ledProfile == LedProfile::MONO);
+  bool allowCCT = (g_ledProfile == LedProfile::CCT || g_ledProfile == LedProfile::RGBCCT);
+  Serial.printf("[KNX-UM] LED profile: %s (RGB=%d, W=%d, CCT=%d)\n",
+    (g_ledProfile==LedProfile::MONO?"MONO":
+     g_ledProfile==LedProfile::CCT?"CCT":
+     g_ledProfile==LedProfile::RGB?"RGB":
+     g_ledProfile==LedProfile::RGBW?"RGBW":"RGBCCT"),
+    (int)allowRGB,(int)allowW,(int)allowCCT);
+
+  if (!allowRGB) { GA_IN_R = GA_IN_G = GA_IN_B = 0; }
+  if (!allowW)   { GA_IN_W = 0; }
+  if (!allowCCT) { GA_IN_CCT = GA_IN_WW = GA_IN_CW = 0; }
+
+  // Optional additional inputs registered separately (will be skipped if masked above)
   GA_IN_W   = parseGA(gaInW);
   if (GA_IN_W) {
     KNX.addGroupObject(GA_IN_W, DptMain::DPT_5xx, false, true);
@@ -233,10 +283,10 @@ void KnxIpUsermod::setup() {
   GA_IN_CCT = parseGA(gaInCct);
   if (GA_IN_CCT) {
     KNX.addGroupObject(GA_IN_CCT, DptMain::DPT_7xx, false, true);
-    KNX.onGroup(GA_IN_CCT, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+    KNX.onGroup(GA_IN_CCT, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && len >= 2) {
-        uint16_t k = ((uint16_t)p[0] << 8) | (uint16_t)p[1]; // big-endian
-        onKnxCct(k);
+        uint16_t kelvin = ((uint16_t)p[0] << 8) | (uint16_t)p[1]; // big-endian DPT 7.xxx
+        onKnxCct(kelvin);
       }
     });
   }
@@ -258,6 +308,7 @@ void KnxIpUsermod::setup() {
     });
   }
 
+  // Parse OUT GA strings
   GA_OUT_PWR = parseGA(gaOutPower);
   GA_OUT_BRI = parseGA(gaOutBri);
   GA_OUT_FX  = parseGA(gaOutFx);
@@ -271,33 +322,34 @@ void KnxIpUsermod::setup() {
   GA_OUT_CW  = parseGA(gaOutCW);
   Serial.printf("[KNX-UM] OUT pwr=0x%04X bri=0x%04X R=0x%04X G=0x%04X B=0x%04X W=0x%04X CCT=0x%04X WW=0x%04X CW=0x%04X fx=0x%04X pre=0x%04X\n",
                 GA_OUT_PWR, GA_OUT_BRI, GA_OUT_R, GA_OUT_G, GA_OUT_B, GA_OUT_W, GA_OUT_CCT, GA_OUT_WW, GA_OUT_CW, GA_OUT_FX, GA_OUT_PRE);
- 
+
+  // --- Gate outputs by LED capability ---
+  if (!(g_ledProfile == LedProfile::RGB || g_ledProfile == LedProfile::RGBW || g_ledProfile == LedProfile::RGBCCT)) {
+    GA_OUT_R = GA_OUT_G = GA_OUT_B = 0;
+  }
+  if (!(g_ledProfile == LedProfile::RGBW)) {
+    GA_OUT_W = 0;
+  }
+  if (!(g_ledProfile == LedProfile::CCT || g_ledProfile == LedProfile::RGBCCT)) {
+    GA_OUT_CCT = GA_OUT_WW = GA_OUT_CW = 0;
+  }
 
   // Register inbound objects and callbacks
   if (GA_IN_PWR) {
     KNX.addGroupObject(GA_IN_PWR, DptMain::DPT_1xx, /*tx=*/false, /*rx=*/true);
     KNX.onGroup(GA_IN_PWR, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write) onKnxPower(KnxIpCore::unpack1Bit(p, len));
-      else if (svc == KnxService::GroupValue_Read) {
-        uint8_t resp = KnxIpCore::pack1Bit(bri > 0);
-        KNX.groupValueResponse(GA_IN_PWR, &resp, 1);
-      }
+      if (svc == KnxService::GroupValue_Write) onKnxPower(p && len ? (p[0] & 0x01) : 0);
     });
   }
 
   if (GA_IN_BRI) {
     KNX.addGroupObject(GA_IN_BRI, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_BRI, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write) onKnxBrightness(KnxIpCore::unpackScaling(p, len));
-      else if (svc == KnxService::GroupValue_Read) {
-        uint8_t resp = KnxIpCore::packScaling(to_pct_0_100(bri));
-        KNX.groupValueResponse(GA_IN_BRI, &resp, 1);
-      }
+    KNX.onGroup(GA_IN_BRI, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxBrightness(p[0]); // 0..255
     });
   }
 
-  // R/G/B channels (DPT 5.010 raw 0..255)
-  // R
+  // RGB inputs (masked to 0 if unsupported)
   if (GA_IN_R) {
     KNX.addGroupObject(GA_IN_R, DptMain::DPT_5xx, false, true);
     KNX.onGroup(GA_IN_R, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
@@ -308,7 +360,6 @@ void KnxIpUsermod::setup() {
       }
     });
   }
-  // G
   if (GA_IN_G) {
     KNX.addGroupObject(GA_IN_G, DptMain::DPT_5xx, false, true);
     KNX.onGroup(GA_IN_G, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
@@ -319,7 +370,6 @@ void KnxIpUsermod::setup() {
       }
     });
   }
-  // B
   if (GA_IN_B) {
     KNX.addGroupObject(GA_IN_B, DptMain::DPT_5xx, false, true);
     KNX.onGroup(GA_IN_B, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
@@ -331,13 +381,13 @@ void KnxIpUsermod::setup() {
     });
   }
 
-  // Effect index (0..255) and Preset (0..250 typical)
   if (GA_IN_FX) {
     KNX.addGroupObject(GA_IN_FX, DptMain::DPT_5xx, false, true);
     KNX.onGroup(GA_IN_FX, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write) onKnxEffect(p && len ? p[0] : 0);
+      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxEffect(p[0]);
     });
   }
+
   if (GA_IN_PRE) {
     KNX.addGroupObject(GA_IN_PRE, DptMain::DPT_5xx, false, true);
     KNX.onGroup(GA_IN_PRE, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
@@ -365,14 +415,12 @@ void KnxIpUsermod::setup() {
     return;
   }
 
-  #ifdef ARDUINO_ARCH_ESP32
+#ifdef ARDUINO_ARCH_ESP32
   WiFi.setSleep(false);     // modem-sleep off helps multicast reliability
-  #endif
+#endif
 
   bool ok = KNX.begin();
-  Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n",
-                ok ? "OK" : "FAILED",
-                ip.toString().c_str());
+  Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n", ok ? "OK" : "FAILED", ip.toString().c_str());
 }
 
 void KnxIpUsermod::publishState() {
@@ -452,6 +500,53 @@ void KnxIpUsermod::publishState() {
 
 void KnxIpUsermod::loop() {
   if (!enabled) return;
+// --- Detect LED capability (lc) change at runtime and rebuild GA mapping immediately ---
+static uint8_t       s_lastLc = 0xFF;
+static unsigned long s_lcChangedAt = 0;
+
+// OR light-capabilities across all segments (robust for multi-bus setups)
+uint8_t lcNow = 0;
+const uint16_t segCount = strip.getSegmentsNum();
+for (uint16_t i = 0; i < segCount; i++) {
+  lcNow |= strip.getSegment(i).getLightCapabilities(); // bit0=RGB, bit1=W, bit2=CCT
+}
+
+if (lcNow != s_lastLc) {
+  s_lastLc = lcNow;
+  s_lcChangedAt = millis();
+  Serial.printf("[KNX-UM] LED capabilities changed (lc=0x%02X). Pending rebuild...\n", lcNow);
+}
+
+// Debounce (avoid thrashing while user edits LED settings in the UI)
+if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
+  s_lcChangedAt = 0;
+
+  LedProfile newProf = detectLedProfileFromSegments();
+  if (newProf != g_ledProfile) {
+    Serial.printf("[KNX-UM] LED profile changed %s -> %s. Re-registering KNX GAs now.\n",
+      (g_ledProfile==LedProfile::MONO?"MONO":
+       g_ledProfile==LedProfile::CCT?"CCT":
+       g_ledProfile==LedProfile::RGB?"RGB":
+       g_ledProfile==LedProfile::RGBW?"RGBW":"RGBCCT"),
+      (newProf==LedProfile::MONO?"MONO":
+       newProf==LedProfile::CCT?"CCT":
+       newProf==LedProfile::RGB?"RGB":
+       newProf==LedProfile::RGBW?"RGBW":"RGBCCT"));
+
+    // Full rebuild: drop socket + GA registry; setup() will detect and re-register
+    KNX.end();
+    KNX.clearRegistrations();
+    g_ledProfile = newProf;   // update hint; setup() re-detects and gates GAs
+    setup();
+
+    // Optional: primer so routers/ETS learn us immediately
+    if (KNX.running()) {
+      const uint16_t primer = knxMakeGroupAddress(0,0,1);
+      KNX.groupValueRead(primer);
+    }
+  }
+}
+
 
   // If KNX could not start in setup() due to missing IP, retry once we have one.
   static bool knxStartedLogged = false;
