@@ -51,7 +51,14 @@ public:
   char  gaOutHSV[16]     = "2/1/14";   // DPST-232-600, 3 bytes
   char  gaOutRGBW[16]    = "2/1/15";   // DPST-251-600, 6 bytes
   char  gaOutIntTemp[16] = "2/2/1";   // DPST-14-68 (4-byte float °C)
-  char  gaOutTemp[16]    = "2/2/2";   // DPST-14-68 (4-byte float °C) - classic Temperature usermod
+  char  gaOutTemp[16]    = "2/2/2";   // DPST-14-68 (4-byte float °C) - classic Temperature usermod  
+  char  gaOutIntTempAlarm[16] = "2/2/3";   // ESP internal temp alarm GA (1-bit Alarm)
+  char  gaOutTempAlarm[16]    = "2/2/4";   // Dallas temp alarm GA (1-bit Alarm)
+
+  // --- Alarm (DPST-1-5) configuration (°C thresholds) ---
+  float intTempAlarmMaxC      = 80.0f;      // trip threshold for ESP internal (°C)
+  float dallasTempAlarmMaxC   = 80.0f;      // trip threshold for Dallas (°C)
+  float tempAlarmHystC        = 1.0f;       // hysteresis (°C) to clear the alarm
 
 
   // TX coalescing
@@ -66,7 +73,7 @@ public:
   uint16_t kelvinMax = 6500;
 
   // in class KnxIpUsermod private/public fields (config)
-  bool     commEnhance        = true;   // Tasmota-style enhancement enable
+  bool     commEnhance        = false;   // Tasmota-style enhancement enable
   uint8_t  commResends        = 3;      // how many total sends
   uint16_t commResendGapMs    = 0;      // gap between repeats
   uint16_t commRxDedupMs      = 700;    // duplicate window
@@ -96,12 +103,17 @@ private:
   uint16_t GA_OUT_RGB = 0, GA_OUT_HSV = 0, GA_OUT_RGBW = 0;
   uint16_t GA_OUT_H = 0, GA_OUT_S = 0, GA_OUT_V = 0;
   uint16_t GA_OUT_INT_TEMP = 0, GA_OUT_TEMP = 0;
+  uint16_t GA_OUT_INT_TEMP_ALARM = 0, GA_OUT_TEMP_ALARM = 0;
 
   // Track last preset value we set (used for OUT if configured)
   uint8_t _lastPreset = 0;
   uint8_t  LAST_R = 0, LAST_G = 0, LAST_B = 0;
   uint8_t  LAST_W = 0;     // 0..255
   uint8_t  LAST_CCT = 127; // 0=warm, 255=cold
+
+  // Last alarm states to send only on change
+  bool lastIntTempAlarmState     = false;
+  bool lastDallasTempAlarmState  = false;
 
   // Outbound state
   void publishState();
@@ -122,6 +134,12 @@ private:
   void onKnxH(float hDeg);
   void onKnxS(float s01);
   void onKnxV(float v01);
+
+  void evalAndPublishTempAlarm(uint16_t ga,
+                             float tempC,
+                             float maxC,
+                             bool& lastState,
+                             const char* tag);
 
   // helper to apply current LAST_W/LAST_CCT to the active color
   void applyWhiteAndCct();

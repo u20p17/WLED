@@ -346,10 +346,12 @@ void KnxIpUsermod::publishTemperatureOnce() {
       KnxIpCore::pack4ByteFloat(tEsp, buf);
       bool ok = KNX.groupValueWrite(GA_OUT_INT_TEMP, buf, 4);
       Serial.printf("TX ESP internal Temp: %.1f °C (%s)\n", tEsp, ok ? "OK" : "FAIL");
+      evalAndPublishTempAlarm(GA_OUT_INT_TEMP_ALARM, tEsp, intTempAlarmMaxC, lastIntTempAlarmState, "ESP-int");
     } else {
       Serial.printf("skip ESP internal Temp: no value\n");
     }
   }
+  
 
   // Dallas DS18B20 -> GA_OUT_TEMP
   if (GA_OUT_TEMP) {
@@ -359,6 +361,7 @@ void KnxIpUsermod::publishTemperatureOnce() {
       KnxIpCore::pack4ByteFloat(tDallas, buf);
       bool ok = KNX.groupValueWrite(GA_OUT_TEMP, buf, 4);
       Serial.printf("TX Dallas Temp: %.1f °C (%s)\n", tDallas, ok ? "OK" : "FAIL");
+      evalAndPublishTempAlarm(GA_OUT_TEMP_ALARM, tDallas, dallasTempAlarmMaxC, lastDallasTempAlarmState, "Dallas");
     } else {
       Serial.printf("skip Dallas Temp: no value\n");
     }
@@ -368,6 +371,45 @@ void KnxIpUsermod::publishTemperatureOnce() {
     Serial.printf("skip: no temperature GAs configured\n");
   }
 }
+
+void KnxIpUsermod::evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC, bool& lastState,const char* tag)
+{
+  if (!ga) return; // not configured
+
+  // Disabled threshold? Allow negative to mean "off"
+  if (!(maxC > -100.0f)) {
+    // Optional: clear if previously set
+    if (lastState) {
+      uint8_t b0 = 0;
+      KNX.groupValueWrite(ga, &b0, 1);
+      lastState = false;
+      Serial.printf("[KNX-UM][TEMP] %s alarm DISABLED -> send 0 to 0x%04X\n", tag, ga);
+    }
+    return;
+  }
+
+  bool trip   = (tempC >= maxC);
+  bool clear  = (tempC <= (maxC - tempAlarmHystC));
+
+  bool newState = lastState;
+  if (!lastState && trip)       newState = true;   // 0 -> 1 (trip)
+  else if (lastState && clear)  newState = false;  // 1 -> 0 (clear)
+
+  if (newState != lastState) {
+    uint8_t bit = newState ? 1 : 0;    // DPST-1-5: 1 = alarm active
+    bool ok = KNX.groupValueWrite(ga, &bit, 1);    // core packs 1-bit correctly
+    Serial.printf("[KNX-UM][TEMP] %s alarm %s @ %.2f°C (thr=%.2f°C, hyst=%.2f) -> GA 0x%04X (%s)\n",
+                  tag, newState ? "ON" : "OFF", tempC, maxC, tempAlarmHystC, ga, ok?"OK":"FAIL");
+    lastState = newState;
+  }
+  else {
+    Serial.printf("[KNX-UM][TEMP] %s alarm unchanged (%s) @ %.2f°C "
+                  "(thr=%.2f°C, hyst=%.2f)\n",
+                  tag, lastState ? "ON" : "OFF",
+                  tempC, maxC, tempAlarmHystC);
+  }
+}
+
 
 // -------------------- Usermod API --------------------
 void KnxIpUsermod::setup() {
@@ -524,6 +566,8 @@ void KnxIpUsermod::setup() {
   GA_OUT_V    = parseGA(gaOutV);
   GA_OUT_INT_TEMP = parseGA(gaOutIntTemp);
   GA_OUT_TEMP     = parseGA(gaOutTemp);
+  GA_OUT_INT_TEMP_ALARM = parseGA(gaOutIntTempAlarm);
+  GA_OUT_TEMP_ALARM     = parseGA(gaOutTempAlarm);
 
   Serial.printf("[KNX-UM] OUT pwr=0x%04X bri=0x%04X R=0x%04X G=0x%04X B=0x%04X W=0x%04X CCT=0x%04X WW=0x%04X CW=0x%04X fx=0x%04X pre=0x%04X H=%04X S=%04X V=%04X\n",
                 GA_OUT_PWR, GA_OUT_BRI, GA_OUT_R, GA_OUT_G, GA_OUT_B, GA_OUT_W, GA_OUT_CCT, GA_OUT_WW, GA_OUT_CW, GA_OUT_FX, GA_OUT_PRE, GA_OUT_H, GA_OUT_S, GA_OUT_V);
@@ -626,8 +670,13 @@ void KnxIpUsermod::setup() {
   if (GA_OUT_V)    KNX.addGroupObject(GA_OUT_V,    DptMain::DPT_5xx, true, false);
   if (GA_OUT_INT_TEMP) KNX.addGroupObject(GA_OUT_INT_TEMP, DptMain::DPT_14xx, true, false);
   if (GA_OUT_TEMP)     KNX.addGroupObject(GA_OUT_TEMP,     DptMain::DPT_14xx, true, false);
+  if (GA_OUT_INT_TEMP_ALARM) KNX.addGroupObject(GA_OUT_INT_TEMP_ALARM, DptMain::DPT_1xx, /*tx=*/true, /*rx=*/false);
+  if (GA_OUT_TEMP_ALARM)     KNX.addGroupObject(GA_OUT_TEMP_ALARM,     DptMain::DPT_1xx, /*tx=*/true, /*rx=*/false);
 
   Serial.printf("[KNX-UM] OUT intTemp=0x%04X temp=0x%04X\n", GA_OUT_INT_TEMP, GA_OUT_TEMP);
+  Serial.printf("[KNX-UM] OUT intTempAlarm=0x%04X tempAlarm=0x%04X (thr: %.1f/%.1f °C, hyst=%.1f)\n",
+  
+    GA_OUT_INT_TEMP_ALARM, GA_OUT_TEMP_ALARM, intTempAlarmMaxC, dallasTempAlarmMaxC, tempAlarmHystC);
   // Start KNX
   IPAddress ip = WiFi.localIP();
   if (!ip || ip.toString() == String("0.0.0.0")) {
@@ -939,6 +988,9 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   top["communication_resends"]      = commResends;
   top["communication_resend_gap"]= commResendGapMs;
   top["communication_rx_dedup"]  = commRxDedupMs;
+  top["Internal Temperature Alarm"]   = intTempAlarmMaxC;
+  top["Temperature Sensor Alarm"]     = dallasTempAlarmMaxC;
+  top["Temperature Alarm Hysteresis"] = tempAlarmHystC;
 
 
   JsonObject gIn  = top.createNestedObject("GA in");
@@ -981,6 +1033,8 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   gOut["rgbw"]   = gaOutRGBW;    // DPST-251-600 (6B)
   gOut["Internal_Temperature"]  = gaOutIntTemp;
   gOut["Temperature_Sensor"]    = gaOutTemp;
+  gOut["Internal_Temperature_Alarm"]  = gaOutIntTempAlarm;
+  gOut["Temperature_Sensor_Alarm"]    = gaOutTempAlarm;
 }
 
 bool KnxIpUsermod::readFromConfig(JsonObject& root) {
@@ -1046,9 +1100,14 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
     strlcpy(gaOutRGBW,   gOut["rgbw"]   | gaOutRGBW,   sizeof(gaOutRGBW));
     strlcpy(gaOutIntTemp, gOut["Internal_Temperature"] | gaOutIntTemp, sizeof(gaOutIntTemp));
     strlcpy(gaOutTemp,    gOut["Temperature_Sensor"]    | gaOutTemp,    sizeof(gaOutTemp));
+    strlcpy(gaOutIntTempAlarm, gOut["Internal_Temperature_Alarm"] | gaOutIntTempAlarm, sizeof(gaOutIntTempAlarm));
+    strlcpy(gaOutTempAlarm,    gOut["Temperature_Sensor_Alarm"]   | gaOutTempAlarm,    sizeof(gaOutTempAlarm));
   }
 
    txRateLimitMs = top["tx_rate_limit_ms"] | txRateLimitMs;
+   intTempAlarmMaxC    = top["Internal Temperature Alarm"]   | intTempAlarmMaxC;
+   dallasTempAlarmMaxC = top["Temperature Sensor Alarm"]     | dallasTempAlarmMaxC;
+   tempAlarmHystC      = top["Temperature Alarm Hysteresis"] | tempAlarmHystC;
 
   // --- decide if a rebuild is needed (compare new parsed GAs vs current cache) ---
   // keep snapshots of previous caches before we overwrite them
@@ -1245,6 +1304,9 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(uxOut+':hsv',1,' [0..255] (DPST-232-600)');"));
   uiScript.print(F("addInfo(uxOut+':Internal_Temperature',1,' [°C] (DPST-14-68)');"));
   uiScript.print(F("addInfo(uxOut+':Temperature_Sensor',1,' [°C] (DPST-14-68)');"));
+  uiScript.print(F("addInfo(uxOut+':Temperature_Sensor_Alarm',1,' [°C] (DPST-1-5)');"));
+  uiScript.print(F("addInfo(uxOut+':Internal_Temperature_Alarm',1,' [°C] (DPST-1-5)');"));
+  
 
   uiScript.print(F("addInfo(ux+':tx_rate_limit_ms',1,' [ms]');"));
 
@@ -1260,6 +1322,10 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(ux+':communication_resend_gap',1,' [ms]');"));
   uiScript.print(F("addInfo(ux+':communication_rx_dedup',1,' [ms]');"));
 
+  uiScript.print(F("addInfo(ux+':Internal Temperature Alarm',1,' [°C]');"));
+  uiScript.print(F("addInfo(ux+':Temperature Sensor Alarm',1,' [°C]');"));
+  uiScript.print(F("addInfo(ux+':Temperature Alarm Hysteresis',1,' [°C]');"));
+
 
   // Tag the KNX card so CSS only scopes there
   uiScript.print(F(
@@ -1268,3 +1334,4 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
     "if(card) card.id='knxip-card';})();"
   ));
 }
+
