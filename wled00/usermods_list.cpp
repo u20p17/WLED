@@ -244,9 +244,9 @@
 
 #ifdef USERMOD_KNX_IP
   #include "../usermods/KNX_IP/usermod_knx_ip.h"
-  #include "../usermods/KNX_IP/usermod_knx_ip.cpp" // compile implementation into this TU to ensure vtable is present
-#include "../usermods/KNX_IP/esp-knx-ip.cpp" // include KNX core implementation so KnxIpCore symbols are linked
-#include "../usermods/KNX_IP/esp-knx-ip-conversion.cpp" // include conversion helpers used by KNX core
+  #include "../usermods/KNX_IP/usermod_knx_ip.cpp"        // compile implementation into this to to ensure vtable is present
+  #include "../usermods/KNX_IP/esp-knx-ip.cpp"            // include KNX core implementation so KnxIpCore symbols are linked
+  #include "../usermods/KNX_IP/esp-knx-ip-conversion.cpp" // include conversion helpers used by KNX core
 #endif
 
 void registerUsermods()

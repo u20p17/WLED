@@ -1,6 +1,11 @@
 #include "usermod_knx_ip.h"
 #include "wled.h"   // access to global 'strip' and segments
 
+extern "C" {
+  // Dallas usermod may (optionally) provide this. If not, we'll just skip Dallas.
+  float __attribute__((weak)) wled_get_temperature_c();
+}
+
 enum class LedProfile : uint8_t { MONO = 1, CCT, RGB, RGBW, RGBCCT };
 static LedProfile g_ledProfile = LedProfile::RGB;
 
@@ -280,15 +285,88 @@ void KnxIpUsermod::onKnxH(float hDeg) {
   float ch,cs,cv; rgbToHsv(r,g,b,ch,cs,cv);
   onKnxHSV(hDeg, cs, cv);
 }
+
 void KnxIpUsermod::onKnxS(float s01) {
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float ch,cs,cv; rgbToHsv(r,g,b,ch,cs,cv);
   onKnxHSV(ch, s01, cv);
 }
+
 void KnxIpUsermod::onKnxV(float v01) {
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float ch,cs,cv; rgbToHsv(r,g,b,ch,cs,cv);
   onKnxHSV(ch, cs, v01);
+}
+
+bool KnxIpUsermod::readEspInternalTempC(float& outC) const {
+#if defined(ESP8266) || defined(CONFIG_IDF_TARGET_ESP32S2)
+  Serial.printf("ESP-int: not supported on this chip\n");
+  return false;
+#else
+  // ESP32 / ESP32S3 / ESP32C3: direct internal sensor read
+  float v = temperatureRead();                 // degrees C (approximate)
+  if (isnan(v) || v < -40.0f || v > 150.0f) {  // quick sanity
+    Serial.printf("ESP-internal Temp: invalid (%.1f)\n", v);
+    return false;
+  }
+  // match the other usermod’s rounding (0.1 °C)
+  v = roundf(v * 10.0f) / 10.0f;
+  Serial.printf("ESP-internal Temp: OK (%.1f °C)\n", v);
+  outC = v;
+  return true;
+#endif
+}
+
+bool KnxIpUsermod::readDallasTempC(float& outC) const {
+  if (&wled_get_temperature_c != nullptr) {
+    float v = wled_get_temperature_c();
+    if (!isnan(v)) {
+      Serial.printf("Dallas Temp probe: OK (%.1f °C)\n", v);
+      outC = v;
+      return true;
+    }
+    Serial.printf("Dallas Temp probe: NaN\n");
+  } else {
+    Serial.printf("Dallas Temp probe: symbol missing\n");
+  }
+  return false;
+}
+
+void KnxIpUsermod::publishTemperatureOnce() {
+  if (!KNX.running()) {
+    Serial.printf("skip: KNX not running\n");
+    return;
+  }
+
+  // ESP32 internal -> GA_OUT_INT_TEMP
+  if (GA_OUT_INT_TEMP) {
+    float tEsp;
+    if (readEspInternalTempC(tEsp)) {
+      uint8_t buf[4];
+      KnxIpCore::pack4ByteFloat(tEsp, buf);
+      bool ok = KNX.groupValueWrite(GA_OUT_INT_TEMP, buf, 4);
+      Serial.printf("TX ESP internal Temp: %.1f °C (%s)\n", tEsp, ok ? "OK" : "FAIL");
+    } else {
+      Serial.printf("skip ESP internal Temp: no value\n");
+    }
+  }
+
+  // Dallas DS18B20 -> GA_OUT_TEMP
+  if (GA_OUT_TEMP) {
+    float tDallas;
+    if (readDallasTempC(tDallas)) {
+      uint8_t buf[4];
+      KnxIpCore::pack4ByteFloat(tDallas, buf);
+      bool ok = KNX.groupValueWrite(GA_OUT_TEMP, buf, 4);
+      Serial.printf("TX Dallas Temp: %.1f °C (%s)\n", tDallas, ok ? "OK" : "FAIL");
+    } else {
+      Serial.printf("skip Dallas Temp: no value\n");
+    }
+  }
+
+  if (!GA_OUT_INT_TEMP && !GA_OUT_TEMP) {
+    Serial.printf("skip: no temperature GAs configured\n");
+  }
 }
 
 // -------------------- Usermod API --------------------
@@ -444,6 +522,8 @@ void KnxIpUsermod::setup() {
   GA_OUT_H    = parseGA(gaOutH);
   GA_OUT_S    = parseGA(gaOutS);
   GA_OUT_V    = parseGA(gaOutV);
+  GA_OUT_INT_TEMP = parseGA(gaOutIntTemp);
+  GA_OUT_TEMP     = parseGA(gaOutTemp);
 
   Serial.printf("[KNX-UM] OUT pwr=0x%04X bri=0x%04X R=0x%04X G=0x%04X B=0x%04X W=0x%04X CCT=0x%04X WW=0x%04X CW=0x%04X fx=0x%04X pre=0x%04X H=%04X S=%04X V=%04X\n",
                 GA_OUT_PWR, GA_OUT_BRI, GA_OUT_R, GA_OUT_G, GA_OUT_B, GA_OUT_W, GA_OUT_CCT, GA_OUT_WW, GA_OUT_CW, GA_OUT_FX, GA_OUT_PRE, GA_OUT_H, GA_OUT_S, GA_OUT_V);
@@ -544,7 +624,10 @@ void KnxIpUsermod::setup() {
   if (GA_OUT_H)    KNX.addGroupObject(GA_OUT_H,    DptMain::DPT_5xx, true, false);
   if (GA_OUT_S)    KNX.addGroupObject(GA_OUT_S,    DptMain::DPT_5xx, true, false);
   if (GA_OUT_V)    KNX.addGroupObject(GA_OUT_V,    DptMain::DPT_5xx, true, false);
+  if (GA_OUT_INT_TEMP) KNX.addGroupObject(GA_OUT_INT_TEMP, DptMain::DPT_14xx, true, false);
+  if (GA_OUT_TEMP)     KNX.addGroupObject(GA_OUT_TEMP,     DptMain::DPT_14xx, true, false);
 
+  Serial.printf("[KNX-UM] OUT intTemp=0x%04X temp=0x%04X\n", GA_OUT_INT_TEMP, GA_OUT_TEMP);
   // Start KNX
   IPAddress ip = WiFi.localIP();
   if (!ip || ip.toString() == String("0.0.0.0")) {
@@ -651,6 +734,9 @@ void KnxIpUsermod::publishState() {
       s_lastPresetSent = _lastPreset;
     }
   }
+
+  // Publish temperature if configured and available
+  publishTemperatureOnce();
 
   // Update “last published” snapshot for color/CCT
   LAST_R = r; LAST_G = g; LAST_B = b; LAST_W = w; LAST_CCT = cct;
@@ -843,16 +929,16 @@ void KnxIpUsermod::scheduleStatePublish(bool pwr, bool bri_, bool fx) {
 void KnxIpUsermod::addToConfig(JsonObject& root) {
   JsonObject top = root.createNestedObject("KNX_IP");
   top["enabled"] = enabled;
-  top["individual_addr"] = individualAddr;
+  top["individual_address"] = individualAddr;
   top["tx_rate_limit_ms"] = txRateLimitMs;
   top["periodic_enabled"] = periodicEnabled;
   top["periodic_interval_ms"] = periodicIntervalMs;
   top["cct_kelvin_min"] = kelvinMin;
   top["cct_kelvin_max"] = kelvinMax;
-  top["comm_enhance"]      = commEnhance;
-  top["comm_resends"]      = commResends;
-  top["comm_resend_gap_ms"]= commResendGapMs;
-  top["comm_rx_dedup_ms"]  = commRxDedupMs;
+  top["communication_enhancement"]      = commEnhance;
+  top["communication_resends"]      = commResends;
+  top["communication_resend_gap"]= commResendGapMs;
+  top["communication_rx_dedup"]  = commRxDedupMs;
 
 
   JsonObject gIn  = top.createNestedObject("GA in");
@@ -893,6 +979,8 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   gOut["rgb"]    = gaOutRGB;     // DPST-232-600 (3B)
   gOut["hsv"]    = gaOutHSV;     // DPST-232-600 (3B)
   gOut["rgbw"]   = gaOutRGBW;    // DPST-251-600 (6B)
+  gOut["Internal_Temperature"]  = gaOutIntTemp;
+  gOut["Temperature_Sensor"]    = gaOutTemp;
 }
 
 bool KnxIpUsermod::readFromConfig(JsonObject& root) {
@@ -903,15 +991,15 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   }
 
   enabled = top["enabled"] | enabled;
-  strlcpy(individualAddr, top["individual_addr"] | individualAddr, sizeof(individualAddr));
+  strlcpy(individualAddr, top["individual_address"] | individualAddr, sizeof(individualAddr));
   kelvinMin = top["cct_kelvin_min"] | kelvinMin;
   kelvinMax = top["cct_kelvin_max"] | kelvinMax;
   periodicEnabled    = top["periodic_enabled"]     | periodicEnabled;
   periodicIntervalMs = top["periodic_interval_ms"] | periodicIntervalMs;
-  commEnhance       = top["comm_enhance"]        | commEnhance;
-  commResends       = top["comm_resends"]        | commResends;
-  commResendGapMs   = top["comm_resend_gap_ms"]  | commResendGapMs;
-  commRxDedupMs     = top["comm_rx_dedup_ms"]    | commRxDedupMs;
+  commEnhance       = top["communication_enhancement"]    | commEnhance;
+  commResends       = top["communication_resends"]        | commResends;
+  commResendGapMs   = top["communication_resend_gap"]  | commResendGapMs;
+  commRxDedupMs     = top["communication_rx_dedup"]    | commRxDedupMs;
 
 
   // 🔧 accept either "GA in"/"GA out" (what we save) or "in"/"out"
@@ -956,6 +1044,8 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
     strlcpy(gaOutRGB,    gOut["rgb"]    | gaOutRGB,    sizeof(gaOutRGB));
     strlcpy(gaOutHSV,    gOut["hsv"]    | gaOutHSV,    sizeof(gaOutHSV));
     strlcpy(gaOutRGBW,   gOut["rgbw"]   | gaOutRGBW,   sizeof(gaOutRGBW));
+    strlcpy(gaOutIntTemp, gOut["Internal_Temperature"] | gaOutIntTemp, sizeof(gaOutIntTemp));
+    strlcpy(gaOutTemp,    gOut["Temperature_Sensor"]    | gaOutTemp,    sizeof(gaOutTemp));
   }
 
    txRateLimitMs = top["tx_rate_limit_ms"] | txRateLimitMs;
@@ -1153,7 +1243,8 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(uxOut+':rgb',1,' [0..255] (DPST-232-600)');"));
   uiScript.print(F("addInfo(uxOut+':rgbw',1,' [0..255] (DPST-251-600)');"));
   uiScript.print(F("addInfo(uxOut+':hsv',1,' [0..255] (DPST-232-600)');"));
-
+  uiScript.print(F("addInfo(uxOut+':Internal_Temperature',1,' [°C] (DPST-14-68)');"));
+  uiScript.print(F("addInfo(uxOut+':Temperature_Sensor',1,' [°C] (DPST-14-68)');"));
 
   uiScript.print(F("addInfo(ux+':tx_rate_limit_ms',1,' [ms]');"));
 
@@ -1163,6 +1254,12 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   // Periodic interval units
   uiScript.print(F("addInfo(ux+':periodic_enabled',1,' [-]');"));
   uiScript.print(F("addInfo(ux+':periodic_interval_ms',1,' [ms]');"));
+
+  uiScript.print(F("addInfo(ux+':communication_enhancement',1,' [-]');"));
+  uiScript.print(F("addInfo(ux+':communication_resends',1,' [-]');"));
+  uiScript.print(F("addInfo(ux+':communication_resend_gap',1,' [ms]');"));
+  uiScript.print(F("addInfo(ux+':communication_rx_dedup',1,' [ms]');"));
+
 
   // Tag the KNX card so CSS only scopes there
   uiScript.print(F(

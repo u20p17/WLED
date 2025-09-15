@@ -33,23 +33,26 @@ public:
   char  gaInRGBW[16]    = "1/1/15";  // DPST-251-600, 6 bytes [R,G,B,W,ext1,ext2]
 
   // Outbound GAs (state feedback WLED -> KNX)
-  char  gaOutPower[16]  = "2/0/1";    // DPT 1.001
-  char  gaOutBri[16]    = "2/0/2";    // DPT 5.001 (0..100%)
-  char  gaOutR[16]      = "2/1/1";    // DPT 5.010 (0..255)
-  char  gaOutG[16]      = "2/1/2";    // DPT 5.010 (0..255)
-  char  gaOutB[16]      = "2/1/3";    // DPT 5.010 (0..255)
-  char  gaOutW[16]      = "2/1/4";    // DPT 5.010 (0..255)
-  char  gaOutCct[16]    = "2/1/5";    // DPT 7.600 (Kelvin)
-  char  gaOutWW[16]     = "2/1/6";    // DPT 5.010 (0..255)
-  char  gaOutCW[16]     = "2/1/7";    // DPT 5.010 (0..255)
-  char  gaOutH[16]      = "2/1/8";    // DPT 5.003 (Hue)
-  char  gaOutS[16]      = "2/1/9";    // DPT 5.001 (S)
-  char  gaOutV[16]      = "2/1/10";   // DPT 5.001 (V)
-  char  gaOutFx[16]     = "2/1/11";   // DPT 5.xxx
-  char  gaOutPreset[16] = "2/1/12";   // DPT 5.xxx (0..255)
-  char  gaOutRGB[16]    = "2/1/13";   // DPST-232-600, 3 bytes
-  char  gaOutHSV[16]    = "2/1/14";   // DPST-232-600, 3 bytes
-  char  gaOutRGBW[16]   = "2/1/15";   // DPST-251-600, 6 bytes
+  char  gaOutPower[16]   = "2/0/1";    // DPT 1.001
+  char  gaOutBri[16]     = "2/0/2";    // DPT 5.001 (0..100%)
+  char  gaOutR[16]       = "2/1/1";    // DPT 5.010 (0..255)
+  char  gaOutG[16]       = "2/1/2";    // DPT 5.010 (0..255)
+  char  gaOutB[16]       = "2/1/3";    // DPT 5.010 (0..255)
+  char  gaOutW[16]       = "2/1/4";    // DPT 5.010 (0..255)
+  char  gaOutCct[16]     = "2/1/5";    // DPT 7.600 (Kelvin)
+  char  gaOutWW[16]      = "2/1/6";    // DPT 5.010 (0..255)
+  char  gaOutCW[16]      = "2/1/7";    // DPT 5.010 (0..255)
+  char  gaOutH[16]       = "2/1/8";    // DPT 5.003 (Hue)
+  char  gaOutS[16]       = "2/1/9";    // DPT 5.001 (S)
+  char  gaOutV[16]       = "2/1/10";   // DPT 5.001 (V)
+  char  gaOutFx[16]      = "2/1/11";   // DPT 5.xxx
+  char  gaOutPreset[16]  = "2/1/12";   // DPT 5.xxx (0..255)
+  char  gaOutRGB[16]     = "2/1/13";   // DPST-232-600, 3 bytes
+  char  gaOutHSV[16]     = "2/1/14";   // DPST-232-600, 3 bytes
+  char  gaOutRGBW[16]    = "2/1/15";   // DPST-251-600, 6 bytes
+  char  gaOutIntTemp[16] = "2/2/1";   // DPST-14-68 (4-byte float °C)
+  char  gaOutTemp[16]    = "2/2/2";   // DPST-14-68 (4-byte float °C) - classic Temperature usermod
+
 
   // TX coalescing
   uint16_t txRateLimitMs = 200;
@@ -92,6 +95,7 @@ private:
   uint16_t GA_IN_H = 0, GA_IN_S = 0, GA_IN_V = 0;
   uint16_t GA_OUT_RGB = 0, GA_OUT_HSV = 0, GA_OUT_RGBW = 0;
   uint16_t GA_OUT_H = 0, GA_OUT_S = 0, GA_OUT_V = 0;
+  uint16_t GA_OUT_INT_TEMP = 0, GA_OUT_TEMP = 0;
 
   // Track last preset value we set (used for OUT if configured)
   uint8_t _lastPreset = 0;
@@ -126,7 +130,11 @@ private:
   static inline uint8_t hueDegToByte(float hDeg) { while (hDeg<0) hDeg+=360.f; while (hDeg>=360) hDeg-=360.f; return (uint8_t)roundf(hDeg * 255.f / 360.f); }
   static inline float   byteToHueDeg(uint8_t hb) { return (hb * 360.f) / 255.f; }
   static inline uint8_t pct01ToByte(float p)     { if (p<0) p=0; if (p>1) p=1; return (uint8_t)roundf(p*255.f); }
-  static inline float   byteToPct01(uint8_t b)   { return b / 255.f; }
+  static inline float   byteToPct01(uint8_t b)   { return b / 255.f;   }
+  
+  bool readEspInternalTempC(float& outC) const;   // Internal_temperature_v2 only
+  bool readDallasTempC(float& outC) const;        // DS18B20 usermod only
+  void publishTemperatureOnce();                  // send each to its own GA
 
   // mapping helpers
   uint8_t  kelvinToCct255(uint16_t k) const;

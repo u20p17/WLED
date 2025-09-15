@@ -73,3 +73,19 @@ float KnxIpCore::unpack2ByteFloat(const uint8_t* p, uint8_t len) {
   float val = float(mant) * powf(2.0f, float(exp)) * 0.01f;
   return (float)sign * val;
 }
+
+void KnxIpCore::pack4ByteFloat(float value, uint8_t out[4]) {
+  union { float f; uint32_t u; } v;
+  v.f = value;                     // IEEE-754 on ESP32
+  out[0] = (uint8_t)(v.u >> 24);   // big-endian
+  out[1] = (uint8_t)(v.u >> 16);
+  out[2] = (uint8_t)(v.u >> 8);
+  out[3] = (uint8_t)(v.u);
+}
+
+float KnxIpCore::unpack4ByteFloat(const uint8_t* p, uint8_t len) {
+  if (!p || len < 4) return NAN;
+  union { float f; uint32_t u; } v;
+  v.u = (uint32_t(p[0])<<24) | (uint32_t(p[1])<<16) | (uint32_t(p[2])<<8) | uint32_t(p[3]);
+  return v.f;
+}

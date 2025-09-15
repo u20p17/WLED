@@ -72,7 +72,7 @@ enum class DptMain : uint16_t {
   DPT_5xx  = 5,   // 8 bit (0..255 / 0..100%)
   DPT_7xx  = 7,   // 2 byte (e.g., Kelvin / unsigned 16)
   DPT_9xx  = 9,   // 2-byte float
-  // add more as needed
+  DPT_14xx = 14,  // 4-byte float (IEEE 754)
 };
 
 // A small description for a KNX group object we care about
@@ -156,15 +156,17 @@ public:
   // Low-level access (advanced): send raw cEMI payload (already composed)
   bool sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen);
 
-    // Pack helpers for common DPTs (implemented in esp-knx-ip-conversion.cpp)
+  // Pack helpers for common DPTs (implemented in esp-knx-ip-conversion.cpp)
   static uint8_t  pack1Bit(bool v);
   static uint8_t  packScaling(uint8_t pct);              // 0..100
   static void     pack2ByteFloat(float value, uint8_t out[2]); // KNX 2-byte float (DPT9)
+  static void     pack4ByteFloat(float value, uint8_t out[4]); // KNX DPT14 (IEEE 754, big-endian)
 
   // Unpack helpers for common DPTs (implemented in esp-knx-ip-conversion.cpp)
   static bool     unpack1Bit(const uint8_t* p, uint8_t len);
   static uint8_t  unpackScaling(const uint8_t* p, uint8_t len);
   static float    unpack2ByteFloat(const uint8_t* p, uint8_t len);
+  static float    unpack4ByteFloat(const uint8_t* p, uint8_t len);
 
   bool running() const { return _running; }
   void clearRegistrations();

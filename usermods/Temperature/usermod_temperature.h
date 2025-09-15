@@ -17,6 +17,8 @@
 #define USERMOD_DALLASTEMPERATURE_MEASUREMENT_INTERVAL 60000
 #endif
 
+
+
 static uint16_t mode_temperature();
 
 class UsermodTemperature : public Usermod {
@@ -470,4 +472,12 @@ static uint16_t mode_temperature() {
   unsigned i = map(roundf(temp), (unsigned)low, (unsigned)high, 0, 248);
   SEGMENT.fill(SEGMENT.color_from_palette(i, false, false, 255));
   return FRAMETIME;
+}
+
+extern "C" float wled_get_temperature_c() {
+  auto inst = UsermodTemperature::getInstance();
+  if (!inst) return NAN;
+  float t = inst->getTemperatureC();   // always °C
+  // this usermod uses <= -100.0 as "invalid / no sensor"
+  return (t <= -100.0f) ? NAN : t;
 }
