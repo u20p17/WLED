@@ -103,11 +103,17 @@ private:
   uint16_t GA_OUT_W  = 0, GA_OUT_CCT= 0, GA_OUT_WW = 0, GA_OUT_CW = 0;
   uint16_t GA_IN_RGB = 0, GA_IN_HSV = 0, GA_IN_RGBW = 0;
   uint16_t GA_IN_H = 0, GA_IN_S = 0, GA_IN_V = 0;
+  uint16_t GA_IN_PWR = 0, GA_IN_BRI = 0, GA_IN_R = 0, GA_IN_G = 0;
+  uint16_t GA_IN_B = 0, GA_IN_FX = 0, GA_IN_PRESET = 0, GA_IN_PRE = 0;
+  uint16_t GA_IN_TIME = 0, GA_IN_DATE = 0, GA_IN_DATETIME = 0;
+
   uint16_t GA_OUT_RGB = 0, GA_OUT_HSV = 0, GA_OUT_RGBW = 0;
   uint16_t GA_OUT_H = 0, GA_OUT_S = 0, GA_OUT_V = 0;
   uint16_t GA_OUT_INT_TEMP = 0, GA_OUT_TEMP = 0;
   uint16_t GA_OUT_INT_TEMP_ALARM = 0, GA_OUT_TEMP_ALARM = 0;
-  uint16_t GA_IN_TIME = 0, GA_IN_DATE = 0, GA_IN_DATETIME = 0;
+  uint16_t GA_OUT_PWR = 0, GA_OUT_BRI = 0, GA_OUT_R = 0, GA_OUT_G = 0;
+  uint16_t GA_OUT_B = 0, GA_OUT_FX = 0, GA_OUT_PRESET = 0, GA_OUT_PRE = 0;
+
 
   // Track last preset value we set (used for OUT if configured)
   uint8_t _lastPreset = 0;

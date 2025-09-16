@@ -7,21 +7,12 @@
   #include <esp_sntp.h>
 #endif
 
-
 // WLED core globals from ntp.cpp
 extern unsigned long ntpLastSyncTime;
 
 extern "C" {
   // Dallas usermod may (optionally) provide this. If not, we'll just skip Dallas.
   float __attribute__((weak)) wled_get_temperature_c();
-}
-
-static void dumpBytesHex(const uint8_t* p, uint8_t len) {
-  Serial.print("[KNX-UM][TIME] Raw: ");
-  for (uint8_t i = 0; i < len; i++) {
-    Serial.printf("%02X ", p[i]);
-  }
-  Serial.println();
 }
 
 enum class LedProfile : uint8_t { MONO = 1, CCT, RGB, RGBW, RGBCCT };
@@ -47,33 +38,6 @@ static LedProfile detectLedProfileFromSegments() {
   if (hasCCT)           return LedProfile::CCT;
   if (hasW)             return LedProfile::MONO;
   return LedProfile::MONO;
-}
-
-// ---- Cached parsed GAs (uint16_t) ----
-namespace {
-  uint16_t GA_IN_PWR  = 0;
-  uint16_t GA_IN_BRI  = 0;
-  uint16_t GA_IN_R    = 0;
-  uint16_t GA_IN_G    = 0;
-  uint16_t GA_IN_B    = 0;
-  uint16_t GA_IN_W    = 0;
-  uint16_t GA_IN_CCT  = 0;
-  uint16_t GA_IN_WW   = 0;
-  uint16_t GA_IN_CW   = 0;
-  uint16_t GA_IN_FX   = 0;
-  uint16_t GA_IN_PRE  = 0;
-
-  uint16_t GA_OUT_PWR = 0;
-  uint16_t GA_OUT_BRI = 0;
-  uint16_t GA_OUT_R   = 0;
-  uint16_t GA_OUT_G   = 0;
-  uint16_t GA_OUT_B   = 0;
-  uint16_t GA_OUT_W   = 0;
-  uint16_t GA_OUT_CCT = 0;
-  uint16_t GA_OUT_WW  = 0;
-  uint16_t GA_OUT_CW  = 0;
-  uint16_t GA_OUT_FX  = 0;
-  uint16_t GA_OUT_PRE = 0;
 }
 
 // Track last-sent preset so we only transmit GA_OUT_PRE when it changes
