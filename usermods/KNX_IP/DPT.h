@@ -50,6 +50,18 @@ typedef enum __weekday
 	DPT_10_001_WEEKDAY_SUNDAY = 7,
 } weekday_t;
 
+typedef struct __dpt19_datetime_t
+{
+  uint8_t year;    // 0..99
+  uint8_t month;   // 1..12
+  uint8_t day;     // 1..31
+  uint8_t weekday; // 1..7
+  uint8_t hour;    // 0..23 (5 bits used)
+  uint8_t minute;  // 0..59 (6 bits used)
+  uint8_t second;  // 0..59 (6 bits used)
+  uint8_t flags;   // bit4=summer time, bit3=invalid date, bit2=invalid time
+}dpt19_datetime_t;
+
 typedef struct __time_of_day
 {
 	weekday_t weekday;

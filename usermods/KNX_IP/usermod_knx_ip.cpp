@@ -1,9 +1,27 @@
 #include "usermod_knx_ip.h"
 #include "wled.h"   // access to global 'strip' and segments
+#include "DPT.h"
+#include <sys/time.h>
+
+#if defined(ESP32)
+  #include <esp_sntp.h>
+#endif
+
+
+// WLED core globals from ntp.cpp
+extern unsigned long ntpLastSyncTime;
 
 extern "C" {
   // Dallas usermod may (optionally) provide this. If not, we'll just skip Dallas.
   float __attribute__((weak)) wled_get_temperature_c();
+}
+
+static void dumpBytesHex(const uint8_t* p, uint8_t len) {
+  Serial.print("[KNX-UM][TIME] Raw: ");
+  for (uint8_t i = 0; i < len; i++) {
+    Serial.printf("%02X ", p[i]);
+  }
+  Serial.println();
 }
 
 enum class LedProfile : uint8_t { MONO = 1, CCT, RGB, RGBW, RGBCCT };
@@ -372,8 +390,7 @@ void KnxIpUsermod::publishTemperatureOnce() {
   }
 }
 
-void KnxIpUsermod::evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC, bool& lastState,const char* tag)
-{
+void KnxIpUsermod::evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC, bool& lastState,const char* tag) {
   if (!ga) return; // not configured
 
   // Disabled threshold? Allow negative to mean "off"
@@ -410,6 +427,272 @@ void KnxIpUsermod::evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC,
   }
 }
 
+void KnxIpUsermod::setSystemClockYMDHMS(int year, int month, int day, int hour, int minute, int second) {
+  // KNX 0..99 -> 2000..2099 (adjust if you prefer a different epoch)
+  if (year < 100) year += 2000;
+
+  struct tm t{};
+  t.tm_year = year - 1900; // years since 1900
+  t.tm_mon  = month - 1;   // 0..11
+  t.tm_mday = day;
+  t.tm_hour = hour;
+  t.tm_min  = minute;
+  t.tm_sec  = second;
+  t.tm_isdst = -1;      // <— let mktime() figure out DST from the TZ rules
+
+  #if defined(ESP32)
+    sntp_stop();                    
+  #endif
+
+  time_t epoch = mktime(&t); // local time
+  if (epoch == (time_t)-1) {
+    Serial.printf("[KNX-UM][TIME] mktime() failed for %04d-%02d-%02d %02d:%02d:%02d\n",
+                  year, month, day, hour, minute, second);
+    return;
+  }
+  // Set system clock (both POSIX ways)
+  struct timeval tv{ .tv_sec = epoch, .tv_usec = 0 };
+  settimeofday(&tv, nullptr);
+
+  tzset();
+
+#if defined(ESP32)
+  sntp_set_sync_status(SNTP_SYNC_STATUS_COMPLETED);
+#endif
+ntpLastSyncTime = (unsigned long)epoch;
+
+Serial.printf("[KNX-UM][TIME] Clock set to %04d-%02d-%02d %02d:%02d:%02d (local)\n",
+                year, month, day, hour, minute, second);
+
+time_t chk = time(nullptr);
+struct tm cur{}; localtime_r(&chk, &cur);
+Serial.printf("[KNX-UM][TIME] Clock set -> %04d-%02d-%02d %02d:%02d:%02d (local, read-back)\n",
+                cur.tm_year + 1900, cur.tm_mon + 1, cur.tm_mday,
+                cur.tm_hour, cur.tm_min, cur.tm_sec);
+}
+
+void KnxIpUsermod::setSystemClockYMDHMS_withDST(int year, int month, int day, int hour, int minute, int second, int isDst /* -1 auto, 0 standard, 1 DST */){
+  if (year < 100) year += 2000;
+
+  struct tm t{};
+  t.tm_year  = year - 1900;
+  t.tm_mon   = month - 1;
+  t.tm_mday  = day;
+  t.tm_hour  = hour;
+  t.tm_min   = minute;
+  t.tm_sec   = second;
+  t.tm_isdst = isDst;      // <— use the hint from DPT19 if provided
+
+  #if defined(ESP32)
+    sntp_stop(); 
+  #endif
+
+  time_t epoch = mktime(&t);
+  if (epoch == (time_t)-1) {
+    Serial.printf("[KNX-UM][TIME] mktime() failed (DST=%d)\n", isDst);
+    return;
+  }
+  struct timeval tv{ .tv_sec = epoch, .tv_usec = 0 };
+  settimeofday(&tv, nullptr);
+
+  tzset();
+
+#if defined(ESP32)
+  sntp_set_sync_status(SNTP_SYNC_STATUS_COMPLETED);
+#endif
+  ntpLastSyncTime = (unsigned long)epoch;
+
+  time_t chk = time(nullptr);
+  struct tm cur{}; localtime_r(&chk, &cur);
+  Serial.printf("[KNX-UM][TIME] DPT19 set -> %04d-%02d-%02d %02d:%02d:%02d (local, read-back, DST=%d)\n",
+                cur.tm_year + 1900, cur.tm_mon + 1, cur.tm_mday,
+                cur.tm_hour, cur.tm_min, cur.tm_sec, cur.tm_isdst);
+}
+
+static inline void applyKnxWallClock(int year, int month, int day, int hour, int minute, int second, int isDst /* -1 auto, 0 std, 1 DST */, bool stopSntp /*true to prevent override*/) {
+  if (year < 100) year += 2000;
+
+  struct tm t{};
+  t.tm_year  = year - 1900;
+  t.tm_mon   = month - 1;
+  t.tm_mday  = day;
+  t.tm_hour  = hour;
+  t.tm_min   = minute;
+  t.tm_sec   = second;
+  t.tm_isdst = isDst;   // for DPT19 use summerTime?1:0; for 10/11 use -1
+
+  // Convert local wall time -> UTC epoch using WLED’s configured TZ/DST
+  time_t epoch = mktime(&t);
+  if (epoch == (time_t)-1) {
+    Serial.printf("[KNX-UM][TIME] mktime() failed for %04d-%02d-%02d %02d:%02d:%02d (isDst=%d)\n",
+                  year, month, day, hour, minute, second, isDst);
+    return;
+  }
+
+#if defined(ESP32)
+  if (stopSntp) sntp_stop();   // optional: keep KNX authoritative
+#endif
+
+  // Hand off to WLED core (updates everything the Info page uses)
+  setTimeFromAPI((uint32_t)epoch);
+
+  // Debug: read back local time
+  time_t chk = time(nullptr);
+  struct tm cur{}; localtime_r(&chk, &cur);
+  Serial.printf("[KNX-UM][TIME] KNX->API set: %04d-%02d-%02d %02d:%02d:%02d (local, read-back)\n",
+                cur.tm_year + 1900, cur.tm_mon + 1, cur.tm_mday,
+                cur.tm_hour, cur.tm_min, cur.tm_sec);
+}
+
+static void dumpBytesHexLocal(const uint8_t* p, uint8_t len) {
+  if (!p || !len) return;
+  Serial.print("[KNX-UM][TIME] Raw: ");
+  for (uint8_t i = 0; i < len; i++) {
+    if (p[i] < 16) Serial.print('0');
+    Serial.print(p[i], HEX);
+    Serial.print(i + 1 < len ? ' ' : ' ');
+  }
+  Serial.println();
+}
+
+void KnxIpUsermod::onKnxTime_10_001(const uint8_t* p, uint8_t len) {
+  if (!p || len < 3) return;
+  dumpBytesHexLocal(p, len);
+
+  const int hour   =  p[0] & 0x1F;  // 5 bits
+  const int minute =  p[1] & 0x3F;  // 6 bits
+  const int second =  p[2] & 0x3F;  // 6 bits
+
+  // Get current date to merge with
+  time_t nowUtc = time(nullptr);
+  struct tm curLocal{}; localtime_r(&nowUtc, &curLocal);
+
+  struct tm t{};
+  t.tm_year  = curLocal.tm_year;                 // keep current date
+  t.tm_mon   = curLocal.tm_mon;
+  t.tm_mday  = curLocal.tm_mday;
+  t.tm_hour  = hour;
+  t.tm_min   = minute;
+  t.tm_sec   = second;
+  t.tm_isdst = -1;                               // let libc apply TZ/DST rules
+
+  time_t epoch = mktime(&t);                     // interpret as *local* wall clock -> UTC epoch
+  if (epoch == (time_t)-1) {
+    Serial.printf("[KNX-UM][TIME] DPT10 mktime() failed for %02d:%02d:%02d\n", hour, minute, second);
+    return;
+  }
+
+#if defined(ESP32)
+  sntp_stop(); // keep KNX authoritative
+#endif
+  setTimeFromAPI((uint32_t)epoch);
+#if defined(ESP32)
+  sntp_set_sync_status(SNTP_SYNC_STATUS_COMPLETED);
+#endif
+
+  struct tm rb{}; localtime_r(&epoch, &rb);
+  Serial.printf("[KNX-UM][TIME] DPT10 set -> %04d-%02d-%02d %02d:%02d:%02d (local)\n",
+                rb.tm_year + 1900, rb.tm_mon + 1, rb.tm_mday, rb.tm_hour, rb.tm_min, rb.tm_sec);
+}
+
+void KnxIpUsermod::onKnxDate_11_001(const uint8_t* p, uint8_t len) {
+  if (!p || len < 3) return;
+  dumpBytesHexLocal(p, len);
+
+  const int day   = p[0] & 0x1F;     // 1..31, mask is defensive
+  const int month = p[1] & 0x0F ? p[1] : p[1]; // keep as-is; input 1..12
+  int year        = p[2];             // 0..99
+  year = (year < 100) ? (2000 + year) : year;
+
+  // Keep current time-of-day
+  time_t nowUtc = time(nullptr);
+  struct tm curLocal{}; localtime_r(&nowUtc, &curLocal);
+
+  struct tm t{};
+  t.tm_year  = year - 1900;
+  t.tm_mon   = (month - 1);
+  t.tm_mday  = day;
+  t.tm_hour  = curLocal.tm_hour;
+  t.tm_min   = curLocal.tm_min;
+  t.tm_sec   = curLocal.tm_sec;
+  t.tm_isdst = -1;                     // let libc apply TZ/DST rules
+
+  time_t epoch = mktime(&t);           // local wall clock -> UTC epoch
+  if (epoch == (time_t)-1) {
+    Serial.printf("[KNX-UM][TIME] DPT11 mktime() failed for %04d-%02d-%02d\n", year, month, day);
+    return;
+  }
+
+#if defined(ESP32)
+  sntp_stop();
+#endif
+  setTimeFromAPI((uint32_t)epoch);
+#if defined(ESP32)
+  sntp_set_sync_status(SNTP_SYNC_STATUS_COMPLETED);
+#endif
+
+  struct tm rb{}; localtime_r(&epoch, &rb);
+  Serial.printf("[KNX-UM][TIME] DPT11 set -> %04d-%02d-%02d %02d:%02d:%02d (local)\n",
+                rb.tm_year + 1900, rb.tm_mon + 1, rb.tm_mday, rb.tm_hour, rb.tm_min, rb.tm_sec);
+}
+
+void KnxIpUsermod::onKnxDateTime_19_001(const uint8_t* p, uint8_t len) {
+  if (!p || len < 8) return;
+  dumpBytesHexLocal(p, len);
+
+  const uint8_t year8  = p[0];
+  const uint8_t month  = p[1];
+  const uint8_t day    = p[2];
+  /*const uint8_t wday = p[3];*/      // weekday not used for setting
+  const uint8_t hourB  = p[4];
+  const uint8_t minB   = p[5];
+  const uint8_t secB   = p[6];
+  const uint8_t flags  = p[7];
+
+  const bool invalidDate = (flags & 0x08) != 0;
+  const bool invalidTime = (flags & 0x04) != 0;
+  const bool summerTime  = (flags & 0x10) != 0;
+
+  if (invalidDate || invalidTime) {
+    Serial.printf("[KNX-UM][TIME] DPT19 invalid flags=0x%02X -> ignore\n", flags);
+    return;
+  }
+
+  int year = (year8 < 100) ? (2000 + year8) : year8;
+  const int hour   = hourB & 0x1F;   // 0..23
+  const int minute = minB  & 0x3F;   // 0..59
+  const int second = secB  & 0x3F;   // 0..59
+
+  // Build local wall time. Use the DPT flag to steer DST explicitly.
+  struct tm t{};
+  t.tm_year  = year - 1900;
+  t.tm_mon   = month - 1;
+  t.tm_mday  = day;
+  t.tm_hour  = hour;
+  t.tm_min   = minute;
+  t.tm_sec   = second;
+  t.tm_isdst = summerTime ? 1 : 0;   // explicit per DPT19
+
+  time_t epoch = mktime(&t);         // local wall clock -> UTC epoch
+  if (epoch == (time_t)-1) {
+    Serial.printf("[KNX-UM][TIME] DPT19 mktime() failed for %04d-%02d-%02d %02d:%02d:%02d (DST=%d)\n",
+                  year, month, day, hour, minute, second, (int)summerTime);
+    return;
+  }
+
+#if defined(ESP32)
+  sntp_stop();
+#endif
+  setTimeFromAPI((uint32_t)epoch);
+#if defined(ESP32)
+  sntp_set_sync_status(SNTP_SYNC_STATUS_COMPLETED);
+#endif
+
+  struct tm rb{}; localtime_r(&epoch, &rb);
+  Serial.printf("[KNX-UM][TIME] DPT19 set -> %04d-%02d-%02d %02d:%02d:%02d (local, DST=%d, flags=0x%02X)\n",
+                rb.tm_year + 1900, rb.tm_mon + 1, rb.tm_mday,
+                rb.tm_hour, rb.tm_min, rb.tm_sec, (int)summerTime, flags);
+}
 
 // -------------------- Usermod API --------------------
 void KnxIpUsermod::setup() {
@@ -447,6 +730,9 @@ void KnxIpUsermod::setup() {
   GA_IN_H    = parseGA(gaInH);
   GA_IN_S    = parseGA(gaInS);
   GA_IN_V    = parseGA(gaInV);
+  GA_IN_TIME     = parseGA(gaInTime);
+  GA_IN_DATE     = parseGA(gaInDate);
+  GA_IN_DATETIME = parseGA(gaInDateTime);
 
   // --- LED capability detect & gate inputs ---
   g_ledProfile = detectLedProfileFromSegments();
@@ -543,6 +829,27 @@ void KnxIpUsermod::setup() {
     KNX.addGroupObject(GA_IN_V, DptMain::DPT_5xx, false, true);
     KNX.onGroup(GA_IN_V, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && len >= 1) onKnxV(byteToPct01(p[0]));
+    });
+  }
+  // DPT 10.001 TimeOfDay (3 bytes)
+  if (GA_IN_TIME) {
+    KNX.addGroupObject(GA_IN_TIME, DptMain::DPT_5xx, /*tx=*/false, /*rx=*/true);
+    KNX.onGroup(GA_IN_TIME, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+      if (svc == KnxService::GroupValue_Write && p && len >= 3) onKnxTime_10_001(p, len);
+    });
+  }
+  // DPT 11.001 Date (3 bytes)
+  if (GA_IN_DATE) {
+    KNX.addGroupObject(GA_IN_DATE, DptMain::DPT_5xx, false, true);
+    KNX.onGroup(GA_IN_DATE, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+      if (svc == KnxService::GroupValue_Write && p && len >= 3) onKnxDate_11_001(p, len);
+    });
+  }
+  // DPT 19.001 DateTime (8 bytes)
+  if (GA_IN_DATETIME) {
+    KNX.addGroupObject(GA_IN_DATETIME, DptMain::DPT_5xx, false, true);
+    KNX.onGroup(GA_IN_DATETIME, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+      if (svc == KnxService::GroupValue_Write && p && len >= 8) onKnxDateTime_19_001(p, len);
     });
   }
 
@@ -1011,6 +1318,9 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   gIn["rgb"]    = gaInRGB;     // DPST-232-600 (3B)
   gIn["hsv"]    = gaInHSV;     // DPST-232-600 (3B)
   gIn["rgbw"]   = gaInRGBW;    // DPST-251-600 (6B)
+  gIn["time"]     = gaInTime;
+  gIn["date"]     = gaInDate;
+  gIn["datetime"] = gaInDateTime;
 
 
   JsonObject gOut = top.createNestedObject("GA out");
@@ -1078,6 +1388,9 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
     strlcpy(gaInRGB,    gIn["rgb"]    | gaInRGB,    sizeof(gaInRGB));
     strlcpy(gaInHSV,    gIn["hsv"]    | gaInHSV,    sizeof(gaInHSV));
     strlcpy(gaInRGBW,   gIn["rgbw"]   | gaInRGBW,   sizeof(gaInRGBW));
+    strlcpy(gaInTime,     gIn["time"]     | gaInTime,     sizeof(gaInTime));
+    strlcpy(gaInDate,     gIn["date"]     | gaInDate,     sizeof(gaInDate));
+    strlcpy(gaInDateTime, gIn["datetime"] | gaInDateTime, sizeof(gaInDateTime));
   }
 
   if (!gOut.isNull()) {
@@ -1283,6 +1596,9 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(uxIn+':rgb',1,' [0..255] (DPST-232-600)');"));
   uiScript.print(F("addInfo(uxIn+':rgbw',1,' [0..255] (DPST-251-600)');"));
   uiScript.print(F("addInfo(uxIn+':hsv',1,' [0..255] (DPST-232-600)');"));
+  uiScript.print(F("addInfo(uxIn+':time',1,' [TimeOfDay,3Bytes](DPT 10.001)');"));
+  uiScript.print(F("addInfo(uxIn+':date',1,' [Date,3Bytes] (DPT 11.001)');"));
+  uiScript.print(F("addInfo(uxIn+':datetime',1,' [DateTime,8Bytes] (DPT 19.001)');"));
 
   // ---- GA out ----
   uiScript.print(F("addInfo(uxOut+':power',1,' [-]  (DPT 1.001)');"));

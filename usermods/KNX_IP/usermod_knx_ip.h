@@ -31,6 +31,9 @@ public:
   char  gaInRGB[16]     = "1/1/13";  // DPST-232-600, 3 bytes [R,G,B]
   char  gaInHSV[16]     = "1/1/14";  // DPST-232-600, 3 bytes [H_byte,S_byte,V_byte]
   char  gaInRGBW[16]    = "1/1/15";  // DPST-251-600, 6 bytes [R,G,B,W,ext1,ext2]
+  char  gaInTime[16]    = "1/7/1";   // DPT 10.001, TimeOfDay (3 bytes)
+  char  gaInDate[16]    = "1/7/2";   // DPT 11.001, Date (3 bytes)
+  char  gaInDateTime[16]= "1/7/3";   // DPT 19.001, DateTime (8 bytes)
 
   // Outbound GAs (state feedback WLED -> KNX)
   char  gaOutPower[16]   = "2/0/1";    // DPT 1.001
@@ -104,6 +107,7 @@ private:
   uint16_t GA_OUT_H = 0, GA_OUT_S = 0, GA_OUT_V = 0;
   uint16_t GA_OUT_INT_TEMP = 0, GA_OUT_TEMP = 0;
   uint16_t GA_OUT_INT_TEMP_ALARM = 0, GA_OUT_TEMP_ALARM = 0;
+  uint16_t GA_IN_TIME = 0, GA_IN_DATE = 0, GA_IN_DATETIME = 0;
 
   // Track last preset value we set (used for OUT if configured)
   uint8_t _lastPreset = 0;
@@ -134,12 +138,15 @@ private:
   void onKnxH(float hDeg);
   void onKnxS(float s01);
   void onKnxV(float v01);
+  void onKnxTime_10_001(const uint8_t* p, uint8_t len);     // expects 3 bytes -> time_of_day_t
+  void onKnxDate_11_001(const uint8_t* p, uint8_t len);     // expects 3 bytes -> date_t
+  void onKnxDateTime_19_001(const uint8_t* p, uint8_t len); // expects 8 bytes
 
-  void evalAndPublishTempAlarm(uint16_t ga,
-                             float tempC,
-                             float maxC,
-                             bool& lastState,
-                             const char* tag);
+  void evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC, bool& lastState, const char* tag);
+
+  // System clock
+  void setSystemClockYMDHMS(int year, int month, int day, int hour, int minute, int second);
+  void setSystemClockYMDHMS_withDST(int year, int month, int day, int hour, int minute, int second, int isDst /* -1 auto, 0 standard, 1 DST */);
 
   // helper to apply current LAST_W/LAST_CCT to the active color
   void applyWhiteAndCct();
