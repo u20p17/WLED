@@ -107,6 +107,25 @@ bool KnxIpUsermod::validateIndividualAddressString(const char* s) {
   return parsePA(s) != 0;
 }
 
+// ---- Small helper registration shims to reduce lambda repetition ----
+// Registers a 1-byte inbound object (if ga!=0) and wires a simple callback taking the first byte.
+static void register1ByteHandler(uint16_t ga, DptMain dpt, std::function<void(uint8_t)> cb) {
+  if (!ga) return;
+  KNX.addGroupObject(ga, dpt, false, true);
+  KNX.onGroup(ga, [cb](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+    if (svc == KnxService::GroupValue_Write && p && len >= 1) cb(p[0]);
+  });
+}
+
+// Registers a multi-byte inbound object (if ga!=0) and wires a callback taking pointer to payload (len already checked).
+static void registerMultiHandler(uint16_t ga, DptMain dpt, uint8_t minLen, std::function<void(const uint8_t*)> cb) {
+  if (!ga) return;
+  KNX.addGroupObject(ga, dpt, false, true);
+  KNX.onGroup(ga, [cb,minLen](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+    if (svc == KnxService::GroupValue_Write && p && len >= minLen) cb(p);
+  });
+}
+
 // --- CCT mapping helpers ---
 uint8_t KnxIpUsermod::kelvinToCct255(uint16_t k) const {
   uint16_t kmin = kelvinMin;
@@ -978,98 +997,59 @@ void KnxIpUsermod::setup() {
   // Optional additional inputs registered separately (will be skipped if masked above)
   GA_IN_W   = parseGA(gaInW);
   if (GA_IN_W) {
-    KNX.addGroupObject(GA_IN_W, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_W, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxWhite(p[0]); // raw 0..255
-    });
+    register1ByteHandler(GA_IN_W, DptMain::DPT_5xx, [this](uint8_t v){ onKnxWhite(v); });
   }
 
   GA_IN_CCT = parseGA(gaInCct);
   if (GA_IN_CCT) {
-    KNX.addGroupObject(GA_IN_CCT, DptMain::DPT_7xx, false, true);
-    KNX.onGroup(GA_IN_CCT, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 2) {
-        uint16_t kelvin = ((uint16_t)p[0] << 8) | (uint16_t)p[1]; // big-endian DPT 7.xxx
-        onKnxCct(kelvin);
-      }
+    registerMultiHandler(GA_IN_CCT, DptMain::DPT_7xx, 2, [this](const uint8_t* p){
+      uint16_t kelvin = ((uint16_t)p[0] << 8) | (uint16_t)p[1];
+      onKnxCct(kelvin);
     });
   }
 
   // Optional direct WW/CW level inputs
   GA_IN_WW = parseGA(gaInWW);
   if (GA_IN_WW) {
-    KNX.addGroupObject(GA_IN_WW, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_WW, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxWW(p[0]); // raw 0..255
-    });
+    register1ByteHandler(GA_IN_WW, DptMain::DPT_5xx, [this](uint8_t v){ onKnxWW(v); });
   }
 
   GA_IN_CW = parseGA(gaInCW);
   if (GA_IN_CW) {
-    KNX.addGroupObject(GA_IN_CW, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_CW, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxCW(p[0]); // raw 0..255
-    });
+    register1ByteHandler(GA_IN_CW, DptMain::DPT_5xx, [this](uint8_t v){ onKnxCW(v); });
   }
 
   if (GA_IN_RGB) {
-    KNX.addGroupObject(GA_IN_RGB, DptMain::DPT_232xx, false, true); // multi-byte (3)
-    KNX.onGroup(GA_IN_RGB, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 3) onKnxRGB(p[0], p[1], p[2]);
-    });
+    registerMultiHandler(GA_IN_RGB, DptMain::DPT_232xx, 3, [this](const uint8_t* p){ onKnxRGB(p[0],p[1],p[2]); });
   }
   if (GA_IN_HSV) {
-    KNX.addGroupObject(GA_IN_HSV, DptMain::DPT_232xx, false, true); // multi-byte (3)
-    KNX.onGroup(GA_IN_HSV, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 3) {
-        float h = byteToHueDeg(p[0]);
-        float s = byteToPct01(p[1]);
-        float v = byteToPct01(p[2]);
-        onKnxHSV(h, s, v);
-      }
+    registerMultiHandler(GA_IN_HSV, DptMain::DPT_232xx, 3, [this](const uint8_t* p){
+      float h = byteToHueDeg(p[0]);
+      float s = byteToPct01(p[1]);
+      float v = byteToPct01(p[2]);
+      onKnxHSV(h,s,v);
     });
   }
   if (GA_IN_RGBW) {
-    KNX.addGroupObject(GA_IN_RGBW, DptMain::DPT_251xx, false, true); // multi-byte (6)
-    KNX.onGroup(GA_IN_RGBW, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 4) onKnxRGBW(p[0], p[1], p[2], p[3]); // ignore ext bytes
-    });
+    registerMultiHandler(GA_IN_RGBW, DptMain::DPT_251xx, 4, [this](const uint8_t* p){ onKnxRGBW(p[0],p[1],p[2],p[3]); });
   }
   if (GA_IN_RGB_REL) {
-    KNX.addGroupObject(GA_IN_RGB_REL, DptMain::DPT_232xx, false, true); // 3 bytes
-    KNX.onGroup(GA_IN_RGB_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){
-      if (s == KnxService::GroupValue_Write && l >= 3) onKnxRGBRel(p[0], p[1], p[2]);
-    });
+    registerMultiHandler(GA_IN_RGB_REL, DptMain::DPT_232xx, 3, [this](const uint8_t* p){ onKnxRGBRel(p[0],p[1],p[2]); });
   }
   if (GA_IN_HSV_REL) {
-    KNX.addGroupObject(GA_IN_HSV_REL, DptMain::DPT_232xx, false, true); // 3 bytes
-    KNX.onGroup(GA_IN_HSV_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){
-      if (s == KnxService::GroupValue_Write && l >= 3) onKnxHSVRel(p[0], p[1], p[2]);
-    });
+    registerMultiHandler(GA_IN_HSV_REL, DptMain::DPT_232xx, 3, [this](const uint8_t* p){ onKnxHSVRel(p[0],p[1],p[2]); });
   }
   if (GA_IN_RGBW_REL) {
-    KNX.addGroupObject(GA_IN_RGBW_REL, DptMain::DPT_251xx, false, true); // 4..6 bytes
-    KNX.onGroup(GA_IN_RGBW_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){
-      if (s == KnxService::GroupValue_Write && l >= 4) onKnxRGBWRel(p[0], p[1], p[2], p[3]);
-    });
+    registerMultiHandler(GA_IN_RGBW_REL, DptMain::DPT_251xx, 4, [this](const uint8_t* p){ onKnxRGBWRel(p[0],p[1],p[2],p[3]); });
   }
   if (GA_IN_H) {
-    KNX.addGroupObject(GA_IN_H, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_H, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxH(byteToHueDeg(p[0]));
-    });
+    register1ByteHandler(GA_IN_H, DptMain::DPT_5xx, [this](uint8_t v){ onKnxH(byteToHueDeg(v)); });
   }
   if (GA_IN_S) {
-    KNX.addGroupObject(GA_IN_S, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_S, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxS(byteToPct01(p[0]));
-    });
+    register1ByteHandler(GA_IN_S, DptMain::DPT_5xx, [this](uint8_t v){ onKnxS(byteToPct01(v)); });
   }
   if (GA_IN_V) {
-    KNX.addGroupObject(GA_IN_V, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_V, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxV(byteToPct01(p[0]));
-    });
+    register1ByteHandler(GA_IN_V, DptMain::DPT_5xx, [this](uint8_t v){ onKnxV(byteToPct01(v)); });
   }
   if (GA_IN_BRI_REL) { KNX.addGroupObject(GA_IN_BRI_REL, DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_BRI_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxBrightnessRel(p[0]); }); }
   if (GA_IN_R_REL)   { KNX.addGroupObject(GA_IN_R_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_R_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxColorRel(0,p[0]); }); }
@@ -1149,63 +1129,40 @@ void KnxIpUsermod::setup() {
 
   // Register inbound objects and callbacks
   if (GA_IN_PWR) {
-    KNX.addGroupObject(GA_IN_PWR, DptMain::DPT_1xx, /*tx=*/false, /*rx=*/true);
-    KNX.onGroup(GA_IN_PWR, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write) onKnxPower(p && len ? (p[0] & 0x01) : 0);
+    KNX.addGroupObject(GA_IN_PWR, DptMain::DPT_1xx, false, true);
+    KNX.onGroup(GA_IN_PWR, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+      if (svc == KnxService::GroupValue_Write && p && len>=1) onKnxPower((p[0] & 0x01)!=0);
     });
   }
 
   if (GA_IN_BRI) {
-    KNX.addGroupObject(GA_IN_BRI, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_BRI, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxBrightness(p[0]); // 0..255
-    });
+    register1ByteHandler(GA_IN_BRI, DptMain::DPT_5xx, [this](uint8_t v){ onKnxBrightness(v); });
   }
 
   // RGB inputs (masked to 0 if unsupported)
   if (GA_IN_R) {
-    KNX.addGroupObject(GA_IN_R, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_R, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) {
-        uint8_t r = p[0];
-        uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw);
-        onKnxRGB(r, cg, cb);
-      }
+    register1ByteHandler(GA_IN_R, DptMain::DPT_5xx, [this](uint8_t r){
+      uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw); onKnxRGB(r,cg,cb);
     });
   }
   if (GA_IN_G) {
-    KNX.addGroupObject(GA_IN_G, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_G, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) {
-        uint8_t g = p[0];
-        uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw);
-        onKnxRGB(cr, g, cb);
-      }
+    register1ByteHandler(GA_IN_G, DptMain::DPT_5xx, [this](uint8_t g){
+      uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw); onKnxRGB(cr,g,cb);
     });
   }
   if (GA_IN_B) {
-    KNX.addGroupObject(GA_IN_B, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_B, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) {
-        uint8_t b = p[0];
-        uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw);
-        onKnxRGB(cr, cg, b);
-      }
+    register1ByteHandler(GA_IN_B, DptMain::DPT_5xx, [this](uint8_t b){
+      uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw); onKnxRGB(cr,cg,b);
     });
   }
 
   if (GA_IN_FX) {
-    KNX.addGroupObject(GA_IN_FX, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_FX, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write && len >= 1) onKnxEffect(p[0]);
-    });
+    register1ByteHandler(GA_IN_FX, DptMain::DPT_5xx, [this](uint8_t v){ onKnxEffect(v); });
   }
 
   if (GA_IN_PRE) {
     KNX.addGroupObject(GA_IN_PRE, DptMain::DPT_5xx, false, true);
-    KNX.onGroup(GA_IN_PRE, [this](uint16_t /*ga*/, DptMain /*dpt*/, KnxService svc, const uint8_t* p, uint8_t len){
-      if (svc == KnxService::GroupValue_Write) onKnxPreset(p && len ? p[0] : 0);
-    });
+    KNX.onGroup(GA_IN_PRE, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){ if (svc==KnxService::GroupValue_Write && p && len>=1) onKnxPreset(p[0]); });
   }
 
   // Outbound/status objects
