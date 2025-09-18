@@ -200,6 +200,8 @@ private:
   static inline float   byteToHueDeg(uint8_t hb) { return (hb * 360.f) / 255.f; }
   static inline uint8_t pct01ToByte(float p)     { if (p<0) p=0; if (p>1) p=1; return (uint8_t)roundf(p*255.f); }
   static inline float   byteToPct01(uint8_t b)   { return b / 255.f;   }
+  // Unified HSV application path. preserveWhite=true keeps existing independent white channel when applying new RGB.
+  void applyHSV(float hDeg, float s01, float v01, bool preserveWhite = true);
   
   bool readEspInternalTempC(float& outC) const;   // Internal_temperature_v2 only
   bool readDallasTempC(float& outC) const;        // DS18B20 usermod only

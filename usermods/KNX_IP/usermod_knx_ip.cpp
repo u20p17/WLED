@@ -264,7 +264,7 @@ void KnxIpUsermod::onKnxHueRel(uint8_t dpt3) {
   if (!d) return;
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float h,s,v; rgbToHsv(r,g,b,h,s,v);
-  h += (float)d; while(h<0) h+=360.f; while(h>=360.f) h-=360.f; onKnxHSV(h,s,v);
+  h += (float)d; while(h<0) h+=360.f; while(h>=360.f) h-=360.f; applyHSV(h,s,v,true);
 }
 
 void KnxIpUsermod::onKnxSatRel(uint8_t dpt3) {
@@ -272,7 +272,7 @@ void KnxIpUsermod::onKnxSatRel(uint8_t dpt3) {
   if (!d) return;
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float h,s,v; rgbToHsv(r,g,b,h,s,v);
-  s += (float)d / 255.f; if (s<0) s=0; if (s>1) s=1; onKnxHSV(h,s,v);
+  s += (float)d / 255.f; if (s<0) s=0; if (s>1) s=1; applyHSV(h,s,v,true);
 }
 
 void KnxIpUsermod::onKnxValRel(uint8_t dpt3) {
@@ -280,7 +280,7 @@ void KnxIpUsermod::onKnxValRel(uint8_t dpt3) {
   if (!d) return;
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float h,s,v; rgbToHsv(r,g,b,h,s,v);
-  v += (float)d / 255.f; if (v<0) v=0; if (v>1) v=1; onKnxHSV(h,s,v);
+  v += (float)d / 255.f; if (v<0) v=0; if (v>1) v=1; applyHSV(h,s,v,true);
 }
 
 void KnxIpUsermod::onKnxEffectRel(uint8_t dpt3) {
@@ -314,7 +314,7 @@ void KnxIpUsermod::onKnxHSVRel(uint8_t hCtl, uint8_t sCtl, uint8_t vCtl) {
   if (dh) { h += (float)dh; while (h < 0) h += 360.f; while (h >= 360.f) h -= 360.f; }
   if (ds) { s += (float)ds / 255.f; if (s < 0) s = 0; if (s > 1) s = 1; }
   if (dv) { v += (float)dv / 255.f; if (v < 0) v = 0; if (v > 1) v = 1; }
-  onKnxHSV(h,s,v); // this preserves existing white and publishes
+  applyHSV(h,s,v,true); // preserves existing white and publishes
 }
 
 // RGBW relative: 4 (or 6) bytes [Rctl,Gctl,Bctl,Wctl,(ext...)]
@@ -442,10 +442,11 @@ void KnxIpUsermod::rgbToHsv(uint8_t r, uint8_t g, uint8_t b, float& h, float& s,
   v = cmax;
 }
 
-void KnxIpUsermod::onKnxHSV(float hDeg, float s01, float v01) {
+void KnxIpUsermod::applyHSV(float hDeg, float s01, float v01, bool preserveWhite) {
   uint8_t r,g,b; hsvToRgb(hDeg, s01, v01, r, g, b);
   uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw);
-  strip.setColor(0, r, g, b, cw); // preserve current white
+  if (!preserveWhite) cw = 0; // optional future use; currently always true
+  strip.setColor(0, r, g, b, cw);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
   scheduleStatePublish(true, true, false);
 }
@@ -453,19 +454,19 @@ void KnxIpUsermod::onKnxHSV(float hDeg, float s01, float v01) {
 void KnxIpUsermod::onKnxH(float hDeg) {
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float ch,cs,cv; rgbToHsv(r,g,b,ch,cs,cv);
-  onKnxHSV(hDeg, cs, cv);
+  applyHSV(hDeg, cs, cv, true);
 }
 
 void KnxIpUsermod::onKnxS(float s01) {
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float ch,cs,cv; rgbToHsv(r,g,b,ch,cs,cv);
-  onKnxHSV(ch, s01, cv);
+  applyHSV(ch, s01, cv, true);
 }
 
 void KnxIpUsermod::onKnxV(float v01) {
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   float ch,cs,cv; rgbToHsv(r,g,b,ch,cs,cv);
-  onKnxHSV(ch, cs, v01);
+  applyHSV(ch, cs, v01, true);
 }
 
 bool KnxIpUsermod::readEspInternalTempC(float& outC) const {
@@ -1027,7 +1028,7 @@ void KnxIpUsermod::setup() {
       float h = byteToHueDeg(p[0]);
       float s = byteToPct01(p[1]);
       float v = byteToPct01(p[2]);
-      onKnxHSV(h,s,v);
+      applyHSV(h,s,v,true);
     });
   }
   if (GA_IN_RGBW) {
