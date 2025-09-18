@@ -110,6 +110,10 @@ public:
 
   void appendConfigData(Print& uiScript) override;  // enable UI hook
 
+  // --- Validation helpers (callable before saving config) ---
+  static bool validateGroupAddressString(const char* s);  // "x/y/z" within KNX 3-level limits
+  static bool validateIndividualAddressString(const char* s); // "a.b.c" within area/line/device limits
+
 private:
   // --- TX coalescing flags/timer ---
   unsigned long _nextTxAt = 0;

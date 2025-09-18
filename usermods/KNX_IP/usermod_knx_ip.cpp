@@ -57,38 +57,54 @@ static inline uint8_t pct_to_0_255(uint8_t pct) { return (uint8_t)((pct * 255u +
 static inline uint8_t to_pct_0_100(uint8_t v0_255) { return (uint8_t)((v0_255 * 100u + 127u) / 255u); }
 static inline uint8_t clamp8i(int v){ return (uint8_t) (v<0?0:(v>255?255:v)); }
 
-// Parse "x/y/z" -> GA (returns 0 if invalid)
+// Parse "x/y/z" -> GA (returns 0 if invalid). Strict unsigned parsing with range enforcement.
 static uint16_t parseGA(const char* s) {
   if (!s || !*s) return 0;
-  int a=0,b=0,c=0; const char* p = s;
-  auto parseUInt = [&](int& out)->bool {
-    int v=0; bool any=false;
-    while (*p >= '0' && *p <= '9') { v = v*10 + (*p-'0'); p++; any=true; }
-    out=v; return any;
+  uint32_t a=0,b=0,c=0; const char* p = s;
+  auto parseUInt = [&](uint32_t& out)->bool {
+    if (*p < '0' || *p > '9') return false; // must start with digit
+    uint32_t v=0;
+    while (*p >= '0' && *p <= '9') {
+      v = v*10u + (uint32_t)(*p - '0');
+      if (v > 1000u) return false; // simple overflow guard
+      p++;
+    }
+    out = v; return true;
   };
   if (!parseUInt(a) || *p!='/') return 0; ++p;
   if (!parseUInt(b) || *p!='/') return 0; ++p;
   if (!parseUInt(c) || *p!='\0') return 0;
-  if (a<0||a>31 || b<0||b>7 || c<0||c>255) return 0;
+  if (a>31u || b>7u || c>255u) return 0;  // KNX 3-level GA limits
   return knxMakeGroupAddress((uint8_t)a,(uint8_t)b,(uint8_t)c);
 }
 
-// Parse individual address "x.x.x" -> 16-bit PA: area(4) | line(4) | dev(8)
+// Parse individual address "x.x.x" -> 16-bit PA: area(4) | line(4) | dev(8). Returns 0 if invalid.
 static uint16_t parsePA(const char* s) {
   if (!s || !*s) return 0;
-  int area=0,line=0,dev=0; const char* p=s;
-  auto parseUInt = [&](int& out)->bool {
-    int v=0; bool any=false;
-    while (*p>='0' && *p<='9') { v=v*10+(*p-'0'); p++; any=true; }
-    out=v; return any;
+  uint32_t area=0,line=0,dev=0; const char* p=s;
+  auto parseUInt = [&](uint32_t& out)->bool {
+    if (*p < '0' || *p > '9') return false;
+    uint32_t v=0;
+    while (*p>='0' && *p<='9') {
+      v = v*10u + (uint32_t)(*p-'0');
+      if (v > 1000u) return false; // guard
+      p++;
+    }
+    out=v; return true;
   };
   if (!parseUInt(area) || *p!='.') return 0; ++p;
   if (!parseUInt(line) || *p!='.') return 0; ++p;
   if (!parseUInt(dev)  || *p!='\0') return 0;
-  if (area<0||area>15) area=1;
-  if (line<0||line>15) line=1;
-  if (dev<0 ||dev>255) dev =100;
+  if (area>15u || line>15u || dev>255u) return 0; // strict
   return (uint16_t)((area & 0x0F) << 12) | (uint16_t)((line & 0x0F) << 8) | (uint16_t)(dev & 0xFF);
+}
+
+// Public validation wrappers (reuse parsing logic without logging)
+bool KnxIpUsermod::validateGroupAddressString(const char* s) {
+  return parseGA(s) != 0;
+}
+bool KnxIpUsermod::validateIndividualAddressString(const char* s) {
+  return parsePA(s) != 0;
 }
 
 // --- CCT mapping helpers ---
@@ -815,13 +831,80 @@ void KnxIpUsermod::onKnxDateTime_19_001(const uint8_t* p, uint8_t len) {
 void KnxIpUsermod::setup() {
   if (!enabled) return;
 
+  // --- Early validation of PA and GA strings (mirrors readFromConfig pre-validation) ---
+  if (*individualAddr && !KnxIpUsermod::validateIndividualAddressString(individualAddr)) {
+    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' at startup -> reverting to 1.1.100\n", individualAddr);
+    strlcpy(individualAddr, "1.1.100", sizeof(individualAddr));
+  }
+  auto validateOrClear = [](char* s, const char* tag){
+    if (*s && !KnxIpUsermod::validateGroupAddressString(s)) {
+      Serial.printf("[KNX-UM][WARN] Invalid GA '%s' (%s) at startup -> disabled\n", s, tag);
+      s[0] = 0;
+    }
+  };
+  validateOrClear(gaInPower,  "gaInPower");
+  validateOrClear(gaInBri,    "gaInBri");
+  validateOrClear(gaInR,      "gaInR");
+  validateOrClear(gaInG,      "gaInG");
+  validateOrClear(gaInB,      "gaInB");
+  validateOrClear(gaInW,      "gaInW");
+  validateOrClear(gaInCct,    "gaInCct");
+  validateOrClear(gaInWW,     "gaInWW");
+  validateOrClear(gaInCW,     "gaInCW");
+  validateOrClear(gaInH,      "gaInH");
+  validateOrClear(gaInS,      "gaInS");
+  validateOrClear(gaInV,      "gaInV");
+  validateOrClear(gaInFx,     "gaInFx");
+  validateOrClear(gaInPreset, "gaInPreset");
+  validateOrClear(gaInRGB,    "gaInRGB");
+  validateOrClear(gaInHSV,    "gaInHSV");
+  validateOrClear(gaInRGBW,   "gaInRGBW");
+  validateOrClear(gaInTime,   "gaInTime");
+  validateOrClear(gaInDate,   "gaInDate");
+  validateOrClear(gaInDateTime, "gaInDateTime");
+  validateOrClear(gaInBriRel, "gaInBriRel");
+  validateOrClear(gaInRRel,   "gaInRRel");
+  validateOrClear(gaInGRel,   "gaInGRel");
+  validateOrClear(gaInBRel,   "gaInBRel");
+  validateOrClear(gaInWRel,   "gaInWRel");
+  validateOrClear(gaInWWRel,  "gaInWWRel");
+  validateOrClear(gaInCWRel,  "gaInCWRel");
+  validateOrClear(gaInHRel,   "gaInHRel");
+  validateOrClear(gaInSRel,   "gaInSRel");
+  validateOrClear(gaInVRel,   "gaInVRel");
+  validateOrClear(gaInFxRel,  "gaInFxRel");
+  validateOrClear(gaInRGBRel, "gaInRGBRel");
+  validateOrClear(gaInHSVRel, "gaInHSVRel");
+  validateOrClear(gaInRGBWRel,"gaInRGBWRel");
+  validateOrClear(gaOutPower, "gaOutPower");
+  validateOrClear(gaOutBri,   "gaOutBri");
+  validateOrClear(gaOutR,     "gaOutR");
+  validateOrClear(gaOutG,     "gaOutG");
+  validateOrClear(gaOutB,     "gaOutB");
+  validateOrClear(gaOutW,     "gaOutW");
+  validateOrClear(gaOutCct,   "gaOutCct");
+  validateOrClear(gaOutWW,    "gaOutWW");
+  validateOrClear(gaOutCW,    "gaOutCW");
+  validateOrClear(gaOutH,     "gaOutH");
+  validateOrClear(gaOutS,     "gaOutS");
+  validateOrClear(gaOutV,     "gaOutV");
+  validateOrClear(gaOutFx,    "gaOutFx");
+  validateOrClear(gaOutPreset,"gaOutPreset");
+  validateOrClear(gaOutRGB,   "gaOutRGB");
+  validateOrClear(gaOutHSV,   "gaOutHSV");
+  validateOrClear(gaOutRGBW,  "gaOutRGBW");
+  validateOrClear(gaOutIntTemp,      "gaOutIntTemp");
+  validateOrClear(gaOutTemp,         "gaOutTemp");
+  validateOrClear(gaOutIntTempAlarm, "gaOutIntTempAlarm");
+  validateOrClear(gaOutTempAlarm,    "gaOutTempAlarm");
+
   // Parse & set PA
   if (uint16_t pa = parsePA(individualAddr)) {
     KNX.setIndividualAddress(pa);
     Serial.printf("[KNX-UM] PA set to %u.%u.%u (0x%04X)\n",
                   (unsigned)((pa>>12)&0x0F), (unsigned)((pa>>8)&0x0F), (unsigned)(pa&0xFF), pa);
   } else {
-    Serial.println("[KNX-UM] WARNING: Invalid individual address string; PA not set.");
+    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' -> using previous/not set\n", individualAddr);
    
   }
 
@@ -838,6 +921,13 @@ void KnxIpUsermod::setup() {
   GA_IN_B    = parseGA(gaInB);
   GA_IN_FX   = parseGA(gaInFx);
   GA_IN_PRE  = parseGA(gaInPreset);
+  if (!GA_IN_PWR   && *gaInPower)  Serial.printf("[KNX-UM][WARN] Invalid GA in power '%s'\n", gaInPower);
+  if (!GA_IN_BRI   && *gaInBri)    Serial.printf("[KNX-UM][WARN] Invalid GA in bri '%s'\n", gaInBri);
+  if (!GA_IN_R     && *gaInR)      Serial.printf("[KNX-UM][WARN] Invalid GA in r '%s'\n", gaInR);
+  if (!GA_IN_G     && *gaInG)      Serial.printf("[KNX-UM][WARN] Invalid GA in g '%s'\n", gaInG);
+  if (!GA_IN_B     && *gaInB)      Serial.printf("[KNX-UM][WARN] Invalid GA in b '%s'\n", gaInB);
+  if (!GA_IN_FX    && *gaInFx)     Serial.printf("[KNX-UM][WARN] Invalid GA in fx '%s'\n", gaInFx);
+  if (!GA_IN_PRE   && *gaInPreset) Serial.printf("[KNX-UM][WARN] Invalid GA in preset '%s'\n", gaInPreset);
   Serial.printf("[KNX-UM] IN  pwr=0x%04X bri=0x%04X R=0x%04X G=0x%04X B=0x%04X fx=0x%04X pre=0x%04X\n",
                 GA_IN_PWR, GA_IN_BRI, GA_IN_R, GA_IN_G, GA_IN_B, GA_IN_FX, GA_IN_PRE);
 
@@ -1582,6 +1672,81 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   strlcpy(gaInRGBWRel, gIn["rgbw_rel"] | gaInRGBWRel, sizeof(gaInRGBWRel)); // composite rel
   }
 
+  // --- Pre-validate GA / PA strings (clear invalid to prevent repeated parse warnings) ---
+  // Validate individual address (personal address / PA)
+  if (*individualAddr && !KnxIpUsermod::validateIndividualAddressString(individualAddr)) {
+    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' in config -> reverting to default 1.1.100\n", individualAddr);
+    strlcpy(individualAddr, "1.1.100", sizeof(individualAddr));
+  }
+
+  auto validateOrClear = [](char* s, const char* tag){
+    if (*s && !KnxIpUsermod::validateGroupAddressString(s)) {
+      Serial.printf("[KNX-UM][WARN] Invalid GA '%s' (%s) -> disabled\n", s, tag);
+      s[0] = 0; // disable
+    }
+  };
+
+  // Inbound GAs
+  validateOrClear(gaInPower, "gaInPower");
+  validateOrClear(gaInBri,   "gaInBri");
+  validateOrClear(gaInR,     "gaInR");
+  validateOrClear(gaInG,     "gaInG");
+  validateOrClear(gaInB,     "gaInB");
+  validateOrClear(gaInW,     "gaInW");
+  validateOrClear(gaInCct,   "gaInCct");
+  validateOrClear(gaInWW,    "gaInWW");
+  validateOrClear(gaInCW,    "gaInCW");
+  validateOrClear(gaInH,     "gaInH");
+  validateOrClear(gaInS,     "gaInS");
+  validateOrClear(gaInV,     "gaInV");
+  validateOrClear(gaInFx,    "gaInFx");
+  validateOrClear(gaInPreset,"gaInPreset");
+  validateOrClear(gaInRGB,   "gaInRGB");
+  validateOrClear(gaInHSV,   "gaInHSV");
+  validateOrClear(gaInRGBW,  "gaInRGBW");
+  validateOrClear(gaInTime,  "gaInTime");
+  validateOrClear(gaInDate,  "gaInDate");
+  validateOrClear(gaInDateTime, "gaInDateTime");
+  validateOrClear(gaInBriRel, "gaInBriRel");
+  validateOrClear(gaInRRel,   "gaInRRel");
+  validateOrClear(gaInGRel,   "gaInGRel");
+  validateOrClear(gaInBRel,   "gaInBRel");
+  validateOrClear(gaInWRel,   "gaInWRel");
+  validateOrClear(gaInWWRel,  "gaInWWRel");
+  validateOrClear(gaInCWRel,  "gaInCWRel");
+  validateOrClear(gaInHRel,   "gaInHRel");
+  validateOrClear(gaInSRel,   "gaInSRel");
+  validateOrClear(gaInVRel,   "gaInVRel");
+  validateOrClear(gaInFxRel,  "gaInFxRel");
+  validateOrClear(gaInRGBRel, "gaInRGBRel");
+  validateOrClear(gaInHSVRel, "gaInHSVRel");
+  validateOrClear(gaInRGBWRel,"gaInRGBWRel");
+
+  // Outbound GAs
+  if (!gOut.isNull()) {
+    validateOrClear(gaOutPower, "gaOutPower");
+    validateOrClear(gaOutBri,   "gaOutBri");
+    validateOrClear(gaOutR,     "gaOutR");
+    validateOrClear(gaOutG,     "gaOutG");
+    validateOrClear(gaOutB,     "gaOutB");
+    validateOrClear(gaOutW,     "gaOutW");
+    validateOrClear(gaOutCct,   "gaOutCct");
+    validateOrClear(gaOutWW,    "gaOutWW");
+    validateOrClear(gaOutCW,    "gaOutCW");
+    validateOrClear(gaOutH,     "gaOutH");
+    validateOrClear(gaOutS,     "gaOutS");
+    validateOrClear(gaOutV,     "gaOutV");
+    validateOrClear(gaOutFx,    "gaOutFx");
+    validateOrClear(gaOutPreset,"gaOutPreset");
+    validateOrClear(gaOutRGB,   "gaOutRGB");
+    validateOrClear(gaOutHSV,   "gaOutHSV");
+    validateOrClear(gaOutRGBW,  "gaOutRGBW");
+    validateOrClear(gaOutIntTemp,      "gaOutIntTemp");
+    validateOrClear(gaOutTemp,         "gaOutTemp");
+    validateOrClear(gaOutIntTempAlarm, "gaOutIntTempAlarm");
+    validateOrClear(gaOutTempAlarm,    "gaOutTempAlarm");
+  }
+
   if (!gOut.isNull()) {
     strlcpy(gaOutPower,  gOut["power"]  | gaOutPower,  sizeof(gaOutPower));
     strlcpy(gaOutBri,    gOut["bri"]    | gaOutBri,    sizeof(gaOutBri));
@@ -1738,7 +1903,7 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
     Serial.printf("[KNX-UM] PA set to %u.%u.%u (0x%04X)\n",
                   (unsigned)((pa>>12)&0x0F), (unsigned)((pa>>8)&0x0F), (unsigned)(pa&0xFF), pa);
   } else {
-    Serial.println("[KNX-UM] WARNING: Invalid individual address string; PA not changed.");
+    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' (unchanged)\n", individualAddr);
   }
 
   // ---- rebuild vs. tweak ----
@@ -1805,8 +1970,8 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(uxIn+':ww',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxIn+':cw',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxIn+':h',1,' [0..255] (DPT 5.003)');"));
-  uiScript.print(F("addInfo(uxIn+':s',1,' [0..255] (DPT 5.010)');"));
-  uiScript.print(F("addInfo(uxIn+':v',1,' [0..255] (DPT 5.010)');"));
+  uiScript.print(F("addInfo(uxIn+':s',1,' [0..100] (DPT 5.001)');")); // Saturation scaling (%)
+  uiScript.print(F("addInfo(uxIn+':v',1,' [0..100] (DPT 5.001)');")); // Value scaling (%)
   uiScript.print(F("addInfo(uxIn+':fx',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxIn+':preset',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxIn+':rgb',1,' [0..255] (DPST-232-600)');"));
@@ -1841,8 +2006,8 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(uxOut+':ww',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxOut+':cw',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxOut+':h',1,' [0..255] (DPT 5.003)');"));
-  uiScript.print(F("addInfo(uxOut+':s',1,' [0..255] (DPT 5.010)');"));
-  uiScript.print(F("addInfo(uxOut+':v',1,' [0..255] (DPT 5.010)');"));
+  uiScript.print(F("addInfo(uxOut+':s',1,' [0..100] (DPT 5.001)');"));
+  uiScript.print(F("addInfo(uxOut+':v',1,' [0..100] (DPT 5.001)');"));
   uiScript.print(F("addInfo(uxOut+':fx',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxOut+':preset',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxOut+':rgb',1,' [0..255] (DPST-232-600)');"));
