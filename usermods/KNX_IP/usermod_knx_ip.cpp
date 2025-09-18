@@ -146,6 +146,159 @@ void KnxIpUsermod::onKnxEffect(uint8_t fxIndex) {
   scheduleStatePublish(false, false, true);
 }
 
+// ---------------- Relative handlers (DPT 3.007) -----------------
+static uint8_t knx_step_pct(uint8_t stepCode) {
+  switch(stepCode) {
+    case 1: return 100; case 2: return 50; case 3: return 25; case 4: return 12; case 5: return 6; case 6: return 3; case 7: return 1; default: return 0; }
+}
+
+static int16_t knx_step_delta(uint8_t nibble, uint16_t maxVal) {
+  if (nibble == 0) return 0; // stop
+  bool inc = (nibble & 0x8) != 0; // bit3
+  uint8_t sc = nibble & 0x7;
+  uint8_t pct = knx_step_pct(sc);
+  uint16_t mag = (uint32_t)maxVal * pct / 100U;
+  if (mag == 0) mag = 1;
+  return inc ? (int16_t)mag : -(int16_t)mag;
+}
+
+void KnxIpUsermod::onKnxBrightnessRel(uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
+  if (!d) return;
+  int val = (int)bri + d;
+  if (val < 0) val = 0; else if (val > 255) val = 255;
+  bri = (uint8_t)val;
+  if (bri > 0) strip.setBrightness(bri);
+  stateUpdated(CALL_MODE_DIRECT_CHANGE);
+  scheduleStatePublish(true, true, true);
+}
+
+void KnxIpUsermod::onKnxColorRel(uint8_t channel, uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
+  if (!d) return;
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  uint8_t* tgt = nullptr;
+  switch(channel){case 0: tgt=&r; break; case 1: tgt=&g; break; case 2: tgt=&b; break; case 3: tgt=&w; break;}
+  if (!tgt) return;
+  int nv = (int)(*tgt) + d; if (nv<0) nv=0; else if (nv>255) nv=255; *tgt=(uint8_t)nv;
+  strip.setColor(0,r,g,b,w);
+  colorUpdated(CALL_MODE_DIRECT_CHANGE);
+  scheduleStatePublish(true,true,false);
+}
+
+void KnxIpUsermod::onKnxWhiteRel(uint8_t dpt3){ onKnxColorRel(3,dpt3); }
+
+void KnxIpUsermod::onKnxWWRel(uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
+  if (!d) return;
+  Segment& seg = strip.getSegment(0);
+  uint8_t cct = seg.cct;
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  uint16_t ww = (uint16_t)w * (255 - cct) / 255;
+  int nww = (int)ww + d; if (nww<0) nww=0; else if (nww>255) nww=255;
+  uint16_t cw = (uint16_t)w * cct / 255; // unchanged
+  uint16_t sum = (uint16_t)nww + cw;
+  uint8_t newW = sum>255?255:(uint8_t)sum;
+  uint8_t newCct = (sum==0)?cct:(uint8_t)((cw*255u + sum/2)/sum);
+  strip.setColor(0,r,g,b,newW);
+  seg.cct = newCct;
+  colorUpdated(CALL_MODE_DIRECT_CHANGE);
+  scheduleStatePublish(true,true,false);
+}
+
+void KnxIpUsermod::onKnxCWRel(uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
+  if (!d) return;
+  Segment& seg = strip.getSegment(0);
+  uint8_t cct = seg.cct;
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  uint16_t cw = (uint16_t)w * cct / 255;
+  int ncw = (int)cw + d; if (ncw<0) ncw=0; else if (ncw>255) ncw=255;
+  uint16_t ww = (uint16_t)w * (255 - cct) / 255;
+  uint16_t sum = (uint16_t)ncw + ww;
+  uint8_t newW = sum>255?255:(uint8_t)sum;
+  uint8_t newCct = (sum==0)?cct:(uint8_t)((ncw*255u + sum/2)/sum);
+  strip.setColor(0,r,g,b,newW);
+  seg.cct = newCct;
+  colorUpdated(CALL_MODE_DIRECT_CHANGE);
+  scheduleStatePublish(true,true,false);
+}
+
+void KnxIpUsermod::onKnxHueRel(uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 30); // max 30-degree jump for 100%
+  if (!d) return;
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  float h,s,v; rgbToHsv(r,g,b,h,s,v);
+  h += (float)d; while(h<0) h+=360.f; while(h>=360.f) h-=360.f; onKnxHSV(h,s,v);
+}
+
+void KnxIpUsermod::onKnxSatRel(uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
+  if (!d) return;
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  float h,s,v; rgbToHsv(r,g,b,h,s,v);
+  s += (float)d / 255.f; if (s<0) s=0; if (s>1) s=1; onKnxHSV(h,s,v);
+}
+
+void KnxIpUsermod::onKnxValRel(uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
+  if (!d) return;
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  float h,s,v; rgbToHsv(r,g,b,h,s,v);
+  v += (float)d / 255.f; if (v<0) v=0; if (v>1) v=1; onKnxHSV(h,s,v);
+}
+
+void KnxIpUsermod::onKnxEffectRel(uint8_t dpt3) {
+  int16_t d = knx_step_delta(dpt3 & 0x0F, 10); if(!d) return; int count = strip.getModeCount(); int cur = (int)effectCurrent + d; if (cur<0) cur=0; else if (cur>=count) cur=count-1; onKnxEffect((uint8_t)cur);
+}
+
+// ---- Composite relative handlers (multi-byte, each byte low nibble = DPT 3.007) ----
+// RGB relative: 3 bytes [Rctl, Gctl, Bctl]
+void KnxIpUsermod::onKnxRGBRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl) {
+  int16_t dr = knx_step_delta(rCtl & 0x0F, 255);
+  int16_t dg = knx_step_delta(gCtl & 0x0F, 255);
+  int16_t db = knx_step_delta(bCtl & 0x0F, 255);
+  if (!dr && !dg && !db) return; //  nothing changed
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  if (dr) { int v = (int)r + dr; if (v<0) v=0; else if (v>255) v=255; r=(uint8_t)v; }
+  if (dg) { int v = (int)g + dg; if (v<0) v=0; else if (v>255) v=255; g=(uint8_t)v; }
+  if (db) { int v = (int)b + db; if (v<0) v=0; else if (v>255) v=255; b=(uint8_t)v; }
+  strip.setColor(0,r,g,b,w);
+  colorUpdated(CALL_MODE_DIRECT_CHANGE);
+  scheduleStatePublish(true,true,false);
+}
+
+// HSV relative: 3 bytes [Hctl, Sctl, Vctl]
+void KnxIpUsermod::onKnxHSVRel(uint8_t hCtl, uint8_t sCtl, uint8_t vCtl) {
+  int16_t dh = knx_step_delta(hCtl & 0x0F, 30);   // same 30° max jump used in single Hue rel
+  int16_t ds = knx_step_delta(sCtl & 0x0F, 255);  // work in 0..255 domain then scale
+  int16_t dv = knx_step_delta(vCtl & 0x0F, 255);
+  if (!dh && !ds && !dv) return;
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  float h,s,v; rgbToHsv(r,g,b,h,s,v);
+  if (dh) { h += (float)dh; while (h < 0) h += 360.f; while (h >= 360.f) h -= 360.f; }
+  if (ds) { s += (float)ds / 255.f; if (s < 0) s = 0; if (s > 1) s = 1; }
+  if (dv) { v += (float)dv / 255.f; if (v < 0) v = 0; if (v > 1) v = 1; }
+  onKnxHSV(h,s,v); // this preserves existing white and publishes
+}
+
+// RGBW relative: 4 (or 6) bytes [Rctl,Gctl,Bctl,Wctl,(ext...)]
+void KnxIpUsermod::onKnxRGBWRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl, uint8_t wCtl) {
+  int16_t dr = knx_step_delta(rCtl & 0x0F, 255);
+  int16_t dg = knx_step_delta(gCtl & 0x0F, 255);
+  int16_t db = knx_step_delta(bCtl & 0x0F, 255);
+  int16_t dw = knx_step_delta(wCtl & 0x0F, 255);
+  if (!dr && !dg && !db && !dw) return; // nothing changed
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  if (dr) { int v = (int)r + dr; if (v<0) v=0; else if (v>255) v=255; r=(uint8_t)v; }
+  if (dg) { int v = (int)g + dg; if (v<0) v=0; else if (v>255) v=255; g=(uint8_t)v; }
+  if (db) { int v = (int)b + db; if (v<0) v=0; else if (v>255) v=255; b=(uint8_t)v; }
+  if (dw) { int v = (int)w + dw; if (v<0) v=0; else if (v>255) v=255; w=(uint8_t)v; }
+  strip.setColor(0,r,g,b,w);
+  colorUpdated(CALL_MODE_DIRECT_CHANGE);
+  scheduleStatePublish(true,true,false);
+}
+
 void KnxIpUsermod::onKnxPreset(uint8_t preset) {
   _lastPreset = preset;    // remember for status OUT
   applyPreset(preset);
@@ -691,12 +844,26 @@ void KnxIpUsermod::setup() {
   GA_IN_RGB  = parseGA(gaInRGB);
   GA_IN_HSV  = parseGA(gaInHSV);
   GA_IN_RGBW = parseGA(gaInRGBW);
+  GA_IN_RGB_REL  = parseGA(gaInRGBRel);
+  GA_IN_HSV_REL  = parseGA(gaInHSVRel);
+  GA_IN_RGBW_REL = parseGA(gaInRGBWRel);
   GA_IN_H    = parseGA(gaInH);
   GA_IN_S    = parseGA(gaInS);
   GA_IN_V    = parseGA(gaInV);
   GA_IN_TIME     = parseGA(gaInTime);
   GA_IN_DATE     = parseGA(gaInDate);
   GA_IN_DATETIME = parseGA(gaInDateTime);
+  GA_IN_BRI_REL = parseGA(gaInBriRel);
+  GA_IN_R_REL   = parseGA(gaInRRel);
+  GA_IN_G_REL   = parseGA(gaInGRel);
+  GA_IN_B_REL   = parseGA(gaInBRel);
+  GA_IN_W_REL   = parseGA(gaInWRel);
+  GA_IN_WW_REL  = parseGA(gaInWWRel);
+  GA_IN_CW_REL  = parseGA(gaInCWRel);
+  GA_IN_H_REL   = parseGA(gaInHRel);
+  GA_IN_S_REL   = parseGA(gaInSRel);
+  GA_IN_V_REL   = parseGA(gaInVRel);
+  GA_IN_FX_REL  = parseGA(gaInFxRel);
 
   // --- LED capability detect & gate inputs ---
   g_ledProfile = detectLedProfileFromSegments();
@@ -711,11 +878,12 @@ void KnxIpUsermod::setup() {
      g_ledProfile==LedProfile::RGBW?"RGBW":"RGBCCT"),
     (int)allowRGB,(int)allowW,(int)allowCCT);
 
-  if (!allowRGB) { GA_IN_R = GA_IN_G = GA_IN_B = 0; }
-  if (!allowW)   { GA_IN_W = 0; }
-  if (!allowCCT) { GA_IN_CCT = GA_IN_WW = GA_IN_CW = 0; }
-  if (!allowRGB) { GA_IN_RGB = GA_IN_HSV = GA_IN_H = GA_IN_S = GA_IN_V = 0; }
-  if (!(g_ledProfile == LedProfile::RGBW || g_ledProfile == LedProfile::RGBCCT)) { GA_IN_RGBW = 0; }
+  if (!allowRGB) { GA_IN_R = GA_IN_G = GA_IN_B = GA_IN_R_REL = GA_IN_G_REL = GA_IN_B_REL = GA_IN_RGB = 
+                    GA_IN_HSV = GA_IN_H = GA_IN_S = GA_IN_V = GA_IN_H_REL = GA_IN_S_REL = GA_IN_V_REL = 
+                    GA_IN_RGB_REL = GA_IN_HSV_REL = 0;  }
+  if (!allowW)   { GA_IN_W = GA_IN_W_REL = 0; }
+  if (!allowCCT) { GA_IN_CCT = GA_IN_WW = GA_IN_CW = GA_IN_WW_REL = GA_IN_CW_REL = 0; }
+  if (!(g_ledProfile == LedProfile::RGBW || g_ledProfile == LedProfile::RGBCCT)) { GA_IN_RGBW = GA_IN_RGBW_REL = 0; }
 
   // Optional additional inputs registered separately (will be skipped if masked above)
   GA_IN_W   = parseGA(gaInW);
@@ -755,13 +923,13 @@ void KnxIpUsermod::setup() {
   }
 
   if (GA_IN_RGB) {
-    KNX.addGroupObject(GA_IN_RGB, DptMain::DPT_5xx, false, true); // multi-byte (3)
+    KNX.addGroupObject(GA_IN_RGB, DptMain::DPT_232xx, false, true); // multi-byte (3)
     KNX.onGroup(GA_IN_RGB, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && len >= 3) onKnxRGB(p[0], p[1], p[2]);
     });
   }
   if (GA_IN_HSV) {
-    KNX.addGroupObject(GA_IN_HSV, DptMain::DPT_5xx, false, true); // multi-byte (3)
+    KNX.addGroupObject(GA_IN_HSV, DptMain::DPT_232xx, false, true); // multi-byte (3)
     KNX.onGroup(GA_IN_HSV, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && len >= 3) {
         float h = byteToHueDeg(p[0]);
@@ -772,9 +940,27 @@ void KnxIpUsermod::setup() {
     });
   }
   if (GA_IN_RGBW) {
-    KNX.addGroupObject(GA_IN_RGBW, DptMain::DPT_5xx, false, true); // multi-byte (6)
+    KNX.addGroupObject(GA_IN_RGBW, DptMain::DPT_251xx, false, true); // multi-byte (6)
     KNX.onGroup(GA_IN_RGBW, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && len >= 4) onKnxRGBW(p[0], p[1], p[2], p[3]); // ignore ext bytes
+    });
+  }
+  if (GA_IN_RGB_REL) {
+    KNX.addGroupObject(GA_IN_RGB_REL, DptMain::DPT_232xx, false, true); // 3 bytes
+    KNX.onGroup(GA_IN_RGB_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){
+      if (s == KnxService::GroupValue_Write && l >= 3) onKnxRGBRel(p[0], p[1], p[2]);
+    });
+  }
+  if (GA_IN_HSV_REL) {
+    KNX.addGroupObject(GA_IN_HSV_REL, DptMain::DPT_232xx, false, true); // 3 bytes
+    KNX.onGroup(GA_IN_HSV_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){
+      if (s == KnxService::GroupValue_Write && l >= 3) onKnxHSVRel(p[0], p[1], p[2]);
+    });
+  }
+  if (GA_IN_RGBW_REL) {
+    KNX.addGroupObject(GA_IN_RGBW_REL, DptMain::DPT_251xx, false, true); // 4..6 bytes
+    KNX.onGroup(GA_IN_RGBW_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){
+      if (s == KnxService::GroupValue_Write && l >= 4) onKnxRGBWRel(p[0], p[1], p[2], p[3]);
     });
   }
   if (GA_IN_H) {
@@ -795,23 +981,34 @@ void KnxIpUsermod::setup() {
       if (svc == KnxService::GroupValue_Write && len >= 1) onKnxV(byteToPct01(p[0]));
     });
   }
+  if (GA_IN_BRI_REL) { KNX.addGroupObject(GA_IN_BRI_REL, DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_BRI_REL, [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxBrightnessRel(p[0]); }); }
+  if (GA_IN_R_REL)   { KNX.addGroupObject(GA_IN_R_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_R_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxColorRel(0,p[0]); }); }
+  if (GA_IN_G_REL)   { KNX.addGroupObject(GA_IN_G_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_G_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxColorRel(1,p[0]); }); }
+  if (GA_IN_B_REL)   { KNX.addGroupObject(GA_IN_B_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_B_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxColorRel(2,p[0]); }); }
+  if (GA_IN_W_REL)   { KNX.addGroupObject(GA_IN_W_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_W_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxWhiteRel(p[0]); }); }
+  if (GA_IN_WW_REL)  { KNX.addGroupObject(GA_IN_WW_REL,  DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_WW_REL,  [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxWWRel(p[0]); }); }
+  if (GA_IN_CW_REL)  { KNX.addGroupObject(GA_IN_CW_REL,  DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_CW_REL,  [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxCWRel(p[0]); }); }
+  if (GA_IN_H_REL)   { KNX.addGroupObject(GA_IN_H_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_H_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxHueRel(p[0]); }); }
+  if (GA_IN_S_REL)   { KNX.addGroupObject(GA_IN_S_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_S_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxSatRel(p[0]); }); }
+  if (GA_IN_V_REL)   { KNX.addGroupObject(GA_IN_V_REL,   DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_V_REL,   [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxValRel(p[0]); }); }
+  if (GA_IN_FX_REL)  { KNX.addGroupObject(GA_IN_FX_REL,  DptMain::DPT_3xx, false, true); KNX.onGroup(GA_IN_FX_REL,  [this](uint16_t, DptMain, KnxService s, const uint8_t* p, uint8_t l){ if (s==KnxService::GroupValue_Write && l>=1) onKnxEffectRel(p[0]); }); }
   // DPT 10.001 TimeOfDay (3 bytes)
   if (GA_IN_TIME) {
-    KNX.addGroupObject(GA_IN_TIME, DptMain::DPT_5xx, /*tx=*/false, /*rx=*/true);
+    KNX.addGroupObject(GA_IN_TIME, DptMain::DPT_10xx, /*tx=*/false, /*rx=*/true);
     KNX.onGroup(GA_IN_TIME, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && p && len >= 3) onKnxTime_10_001(p, len);
     });
   }
   // DPT 11.001 Date (3 bytes)
   if (GA_IN_DATE) {
-    KNX.addGroupObject(GA_IN_DATE, DptMain::DPT_5xx, false, true);
+    KNX.addGroupObject(GA_IN_DATE, DptMain::DPT_11xx, false, true);
     KNX.onGroup(GA_IN_DATE, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && p && len >= 3) onKnxDate_11_001(p, len);
     });
   }
   // DPT 19.001 DateTime (8 bytes)
   if (GA_IN_DATETIME) {
-    KNX.addGroupObject(GA_IN_DATETIME, DptMain::DPT_5xx, false, true);
+    KNX.addGroupObject(GA_IN_DATETIME, DptMain::DPT_19xx, false, true);
     KNX.onGroup(GA_IN_DATETIME, [this](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
       if (svc == KnxService::GroupValue_Write && p && len >= 8) onKnxDateTime_19_001(p, len);
     });
@@ -933,9 +1130,9 @@ void KnxIpUsermod::setup() {
   if (GA_OUT_CCT) KNX.addGroupObject(GA_OUT_CCT, DptMain::DPT_7xx, true, false);
   if (GA_OUT_WW)  KNX.addGroupObject(GA_OUT_WW,  DptMain::DPT_5xx, true, false);
   if (GA_OUT_CW)  KNX.addGroupObject(GA_OUT_CW,  DptMain::DPT_5xx, true, false);
-  if (GA_OUT_RGB)  KNX.addGroupObject(GA_OUT_RGB,  DptMain::DPT_5xx, true, false);
-  if (GA_OUT_HSV)  KNX.addGroupObject(GA_OUT_HSV,  DptMain::DPT_5xx, true, false);
-  if (GA_OUT_RGBW) KNX.addGroupObject(GA_OUT_RGBW, DptMain::DPT_5xx, true, false);
+  if (GA_OUT_RGB)  KNX.addGroupObject(GA_OUT_RGB,  DptMain::DPT_232xx, true, false);
+  if (GA_OUT_HSV)  KNX.addGroupObject(GA_OUT_HSV,  DptMain::DPT_232xx, true, false);
+  if (GA_OUT_RGBW) KNX.addGroupObject(GA_OUT_RGBW, DptMain::DPT_251xx, true, false);
   if (GA_OUT_H)    KNX.addGroupObject(GA_OUT_H,    DptMain::DPT_5xx, true, false);
   if (GA_OUT_S)    KNX.addGroupObject(GA_OUT_S,    DptMain::DPT_5xx, true, false);
   if (GA_OUT_V)    KNX.addGroupObject(GA_OUT_V,    DptMain::DPT_5xx, true, false);
@@ -1285,6 +1482,20 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   gIn["time"]     = gaInTime;
   gIn["date"]     = gaInDate;
   gIn["datetime"] = gaInDateTime;
+  gIn["bri_rel"] = gaInBriRel; // DPT 3.007 step/direction
+  gIn["r_rel"]   = gaInRRel;   // DPT 3.007
+  gIn["g_rel"]   = gaInGRel;   // DPT 3.007
+  gIn["b_rel"]   = gaInBRel;   // DPT 3.007
+  gIn["w_rel"]   = gaInWRel;   // DPT 3.007
+  gIn["ww_rel"]  = gaInWWRel;  // DPT 3.007
+  gIn["cw_rel"]  = gaInCWRel;  // DPT 3.007
+  gIn["h_rel"]   = gaInHRel;   // DPT 3.007
+  gIn["s_rel"]   = gaInSRel;   // DPT 3.007
+  gIn["v_rel"]   = gaInVRel;   // DPT 3.007
+  gIn["fx_rel"]  = gaInFxRel;  // DPT 3.007
+  gIn["rgb_rel"] = gaInRGBRel;  // DPST-232-600 (3B, each byte low nibble DPT3)
+  gIn["hsv_rel"] = gaInHSVRel;  // DPST-232-600 (3B, each byte low nibble DPT3)
+  gIn["rgbw_rel"] = gaInRGBWRel; // DPST-251-600 (4+ bytes, first 4 used)
 
 
   JsonObject gOut = top.createNestedObject("GA out");
@@ -1330,7 +1541,7 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   commRxDedupMs     = top["communication_rx_dedup"]    | commRxDedupMs;
 
 
-  // 🔧 accept either "GA in"/"GA out" (what we save) or "in"/"out"
+  // accept either "GA in"/"GA out" (what we save) or "in"/"out"
   JsonObject gIn  = top["GA in"];  if (gIn.isNull())  gIn  = top["in"];
   JsonObject gOut = top["GA out"]; if (gOut.isNull()) gOut = top["out"];
 
@@ -1355,6 +1566,20 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
     strlcpy(gaInTime,     gIn["time"]     | gaInTime,     sizeof(gaInTime));
     strlcpy(gaInDate,     gIn["date"]     | gaInDate,     sizeof(gaInDate));
     strlcpy(gaInDateTime, gIn["datetime"] | gaInDateTime, sizeof(gaInDateTime));
+  strlcpy(gaInBriRel, gIn["bri_rel"] | gaInBriRel, sizeof(gaInBriRel)); // DPT 3.007
+  strlcpy(gaInRRel,   gIn["r_rel"]   | gaInRRel,   sizeof(gaInRRel));   // DPT 3.007
+  strlcpy(gaInGRel,   gIn["g_rel"]   | gaInGRel,   sizeof(gaInGRel));   // DPT 3.007
+  strlcpy(gaInBRel,   gIn["b_rel"]   | gaInBRel,   sizeof(gaInBRel));   // DPT 3.007
+  strlcpy(gaInWRel,   gIn["w_rel"]   | gaInWRel,   sizeof(gaInWRel));   // DPT 3.007
+  strlcpy(gaInWWRel,  gIn["ww_rel"]  | gaInWWRel,  sizeof(gaInWWRel));  // DPT 3.007
+  strlcpy(gaInCWRel,  gIn["cw_rel"]  | gaInCWRel,  sizeof(gaInCWRel));  // DPT 3.007
+  strlcpy(gaInHRel,   gIn["h_rel"]   | gaInHRel,   sizeof(gaInHRel));   // DPT 3.007
+  strlcpy(gaInSRel,   gIn["s_rel"]   | gaInSRel,   sizeof(gaInSRel));   // DPT 3.007
+  strlcpy(gaInVRel,   gIn["v_rel"]   | gaInVRel,   sizeof(gaInVRel));   // DPT 3.007
+  strlcpy(gaInFxRel,  gIn["fx_rel"]  | gaInFxRel,  sizeof(gaInFxRel));  // DPT 3.007
+  strlcpy(gaInRGBRel,  gIn["rgb_rel"]  | gaInRGBRel,  sizeof(gaInRGBRel));  // composite rel
+  strlcpy(gaInHSVRel,  gIn["hsv_rel"]  | gaInHSVRel,  sizeof(gaInHSVRel));  // composite rel
+  strlcpy(gaInRGBWRel, gIn["rgbw_rel"] | gaInRGBWRel, sizeof(gaInRGBWRel)); // composite rel
   }
 
   if (!gOut.isNull()) {
@@ -1393,7 +1618,12 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
                  PREV_IN_CCT = GA_IN_CCT, PREV_IN_WW = GA_IN_WW, PREV_IN_CW = GA_IN_CW,
                  PREV_IN_FX = GA_IN_FX, PREV_IN_PRE = GA_IN_PRE, PREV_IN_RGB = GA_IN_RGB,
                  PREV_IN_HSV = GA_IN_HSV, PREV_IN_RGBW = GA_IN_RGBW, PREV_IN_H = GA_IN_H,
-                 PREV_IN_S = GA_IN_S, PREV_IN_V = GA_IN_V;
+                 PREV_IN_S = GA_IN_S, PREV_IN_V = GA_IN_V, PREV_IN_BRI_REL = GA_IN_BRI_REL, 
+                 PREV_IN_R_REL = GA_IN_R_REL, PREV_IN_G_REL = GA_IN_G_REL, PREV_IN_B_REL = GA_IN_B_REL,
+                 PREV_IN_W_REL = GA_IN_W_REL, PREV_IN_WW_REL = GA_IN_WW_REL, PREV_IN_CW_REL = GA_IN_CW_REL,
+                 PREV_IN_H_REL = GA_IN_H_REL, PREV_IN_S_REL = GA_IN_S_REL, PREV_IN_V_REL = GA_IN_V_REL, 
+                 PREV_IN_FX_REL = GA_IN_FX_REL, PREV_IN_RGB_REL = GA_IN_RGB_REL, PREV_IN_HSV_REL = GA_IN_HSV_REL,
+                 PREV_IN_RGBW_REL = GA_IN_RGBW_REL;
 
   const uint16_t PREV_OUT_PWR = GA_OUT_PWR, PREV_OUT_BRI = GA_OUT_BRI, PREV_OUT_R = GA_OUT_R,
                  PREV_OUT_G = GA_OUT_G, PREV_OUT_B = GA_OUT_B, PREV_OUT_W = GA_OUT_W,
@@ -1420,6 +1650,20 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   const uint16_t NEW_IN_RGB = parseGA(gaInRGB);
   const uint16_t NEW_IN_HSV = parseGA(gaInHSV);
   const uint16_t NEW_IN_RGBW = parseGA(gaInRGBW);
+  const uint16_t NEW_IN_RGB_REL = parseGA(gaInRGBRel);
+  const uint16_t NEW_IN_HSV_REL = parseGA(gaInHSVRel);
+  const uint16_t NEW_IN_RGBW_REL = parseGA(gaInRGBWRel);
+  const uint16_t NEW_IN_BRI_REL = parseGA(gaInBriRel);
+  const uint16_t NEW_IN_R_REL   = parseGA(gaInRRel);
+  const uint16_t NEW_IN_G_REL   = parseGA(gaInGRel);
+  const uint16_t NEW_IN_B_REL   = parseGA(gaInBRel);
+  const uint16_t NEW_IN_W_REL   = parseGA(gaInWRel);
+  const uint16_t NEW_IN_WW_REL  = parseGA(gaInWWRel);
+  const uint16_t NEW_IN_CW_REL  = parseGA(gaInCWRel);
+  const uint16_t NEW_IN_H_REL   = parseGA(gaInHRel);
+  const uint16_t NEW_IN_S_REL   = parseGA(gaInSRel);
+  const uint16_t NEW_IN_V_REL   = parseGA(gaInVRel);
+  const uint16_t NEW_IN_FX_REL  = parseGA(gaInFxRel);
 
   const uint16_t NEW_OUT_PWR = parseGA(gaOutPower);
   const uint16_t NEW_OUT_BRI = parseGA(gaOutBri);
@@ -1452,7 +1696,11 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
       (NEW_IN_RGB != PREV_IN_RGB) || (NEW_IN_HSV != PREV_IN_HSV) || (NEW_IN_RGBW != PREV_IN_RGBW) ||
       (NEW_OUT_RGB != PREV_OUT_RGB) || (NEW_OUT_HSV != PREV_OUT_HSV) || (NEW_OUT_RGBW != PREV_OUT_RGBW) ||
       (NEW_IN_H != PREV_IN_H) || (NEW_IN_S != PREV_IN_S) || (NEW_IN_V != PREV_IN_V) ||
-      (NEW_OUT_H != PREV_OUT_H) || (NEW_OUT_S != PREV_OUT_S) || (NEW_OUT_V != PREV_OUT_V);
+      (NEW_OUT_H != PREV_OUT_H) || (NEW_OUT_S != PREV_OUT_S) || (NEW_OUT_V != PREV_OUT_V) ||
+      (NEW_IN_BRI_REL != PREV_IN_BRI_REL) || (NEW_IN_R_REL != PREV_IN_R_REL) || (NEW_IN_G_REL != PREV_IN_G_REL) || (NEW_IN_B_REL != PREV_IN_B_REL) ||
+      (NEW_IN_W_REL != PREV_IN_W_REL) || (NEW_IN_WW_REL != PREV_IN_WW_REL) || (NEW_IN_CW_REL != PREV_IN_CW_REL) ||
+  (NEW_IN_H_REL != PREV_IN_H_REL) || (NEW_IN_S_REL != PREV_IN_S_REL) || (NEW_IN_V_REL != PREV_IN_V_REL) || (NEW_IN_FX_REL != PREV_IN_FX_REL) ||
+  (NEW_IN_RGB_REL != PREV_IN_RGB_REL) || (NEW_IN_HSV_REL != PREV_IN_HSV_REL) || (NEW_IN_RGBW_REL != PREV_IN_RGBW_REL);
 
   bool prevEnabled = KNX.running();  // current runtime state is a good proxy here
 
@@ -1461,6 +1709,10 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   GA_IN_B    = NEW_IN_B;    GA_IN_W   = NEW_IN_W;   GA_IN_CCT = NEW_IN_CCT; GA_IN_WW = NEW_IN_WW;
   GA_IN_CW   = NEW_IN_CW;   GA_IN_FX  = NEW_IN_FX;  GA_IN_PRE = NEW_IN_PRE; GA_IN_H = NEW_IN_H;
   GA_IN_S    = NEW_IN_S;    GA_IN_V   = NEW_IN_V;   GA_IN_RGB = NEW_IN_RGB; GA_IN_HSV = NEW_IN_HSV; GA_IN_RGBW = NEW_IN_RGBW; 
+  GA_IN_BRI_REL = NEW_IN_BRI_REL; GA_IN_R_REL = NEW_IN_R_REL; GA_IN_G_REL = NEW_IN_G_REL; GA_IN_B_REL = NEW_IN_B_REL;
+  GA_IN_W_REL = NEW_IN_W_REL; GA_IN_WW_REL = NEW_IN_WW_REL; GA_IN_CW_REL = NEW_IN_CW_REL;
+  GA_IN_H_REL = NEW_IN_H_REL; GA_IN_S_REL = NEW_IN_S_REL; GA_IN_V_REL = NEW_IN_V_REL; GA_IN_FX_REL = NEW_IN_FX_REL;
+  GA_IN_RGB_REL = NEW_IN_RGB_REL; GA_IN_HSV_REL = NEW_IN_HSV_REL; GA_IN_RGBW_REL = NEW_IN_RGBW_REL;
 
   GA_OUT_PWR = NEW_OUT_PWR; GA_OUT_BRI = NEW_OUT_BRI; GA_OUT_R = NEW_OUT_R; GA_OUT_G = NEW_OUT_G;
   GA_OUT_B   = NEW_OUT_B;   GA_OUT_W   = NEW_OUT_W;   GA_OUT_CCT = NEW_OUT_CCT; GA_OUT_WW = NEW_OUT_WW;
@@ -1563,6 +1815,20 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(uxIn+':time',1,' [TimeOfDay,3Bytes](DPT 10.001)');"));
   uiScript.print(F("addInfo(uxIn+':date',1,' [Date,3Bytes] (DPT 11.001)');"));
   uiScript.print(F("addInfo(uxIn+':datetime',1,' [DateTime,8Bytes] (DPT 19.001)');"));
+  uiScript.print(F("addInfo(uxIn+':bri_rel',1,' [step dir] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':r_rel',1,' [step dir] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':g_rel',1,' [step dir] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':b_rel',1,' [step dir] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':w_rel',1,' [step dir] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':ww_rel',1,' [step dir] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':cw_rel',1,' [step dir] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':h_rel',1,' [step hue] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':s_rel',1,' [step sat] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':v_rel',1,' [step val] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':fx_rel',1,' [step fx] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':rgb_rel',1,' [R,G,B,3Bytes] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':hsv_rel',1,' [H,S,V,3Bytes] (DPT 3.007)');"));
+  uiScript.print(F("addInfo(uxIn+':rgbw_rel',1,' [R,G,B,W,4Bytes] (DPT 3.007)');"));
 
   // ---- GA out ----
   uiScript.print(F("addInfo(uxOut+':power',1,' [-]  (DPT 1.001)');"));
@@ -1614,4 +1880,3 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
     "if(card) card.id='knxip-card';})();"
   ));
 }
-

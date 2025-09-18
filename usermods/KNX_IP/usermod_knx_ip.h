@@ -34,6 +34,24 @@ public:
   char  gaInTime[16]    = "1/7/1";   // DPT 10.001, TimeOfDay (3 bytes)
   char  gaInDate[16]    = "1/7/2";   // DPT 11.001, Date (3 bytes)
   char  gaInDateTime[16]= "1/7/3";   // DPT 19.001, DateTime (8 bytes)
+  // NEW: Relative adjustment inbound GAs using DPT 3.007 (4-bit step+direction, "Dimmen Relativ")
+  // each telegram encodes one relative step (no continuous ramp maintained here).
+  // Mapping (bit3=direction 0=decrease 1=increase, bits2..0 step code):
+  // 0=STOP (ignored), 1=100, 2=50, 3=25, 4=12, 5=6, 6=3, 7=1 (% of full scale for brightness, scaled for channels)
+  char  gaInBriRel[16]  = "1/0/3";   // DPT 3.007 relative brightness
+  char  gaInRRel[16]    = "1/1/16";  // DPT 3.007 relative Red
+  char  gaInGRel[16]    = "1/1/17";  // DPT 3.007 relative Green
+  char  gaInBRel[16]    = "1/1/18";  // DPT 3.007 relative Blue
+  char  gaInWRel[16]    = "1/1/19";  // DPT 3.007 relative White
+  char  gaInWWRel[16]   = "1/1/20";  // DPT 3.007 relative Warm component (translated to W+CCT)
+  char  gaInCWRel[16]   = "1/1/21";  // DPT 3.007 relative Cold component (translated to W+CCT)
+  char  gaInHRel[16]    = "1/1/22";  // DPT 3.007 relative Hue (treated as step degrees)
+  char  gaInSRel[16]    = "1/1/23";  // DPT 3.007 relative Sat
+  char  gaInVRel[16]    = "1/1/24";  // DPT 3.007 relative Value
+  char  gaInFxRel[16]   = "1/1/25";  // DPT 3.007 relative Effect index
+  char  gaInRGBRel[16]  = "1/1/26";  // DPST-232-600 relative RGB (3 bytes: R,G,B each DPT3 low nibble)
+  char  gaInHSVRel[16]  = "1/1/27";  // DPST-232-600 relative HSV (3 bytes: H,S,V each DPT3 low nibble)
+  char  gaInRGBWRel[16] = "1/1/28";  // DPST-251-600 relative RGBW (4 or 6 bytes: R,G,B,W DPT3)
 
   // Outbound GAs (state feedback WLED -> KNX)
   char  gaOutPower[16]   = "2/0/1";    // DPT 1.001
@@ -106,6 +124,10 @@ private:
   uint16_t GA_IN_PWR = 0, GA_IN_BRI = 0, GA_IN_R = 0, GA_IN_G = 0;
   uint16_t GA_IN_B = 0, GA_IN_FX = 0, GA_IN_PRESET = 0, GA_IN_PRE = 0;
   uint16_t GA_IN_TIME = 0, GA_IN_DATE = 0, GA_IN_DATETIME = 0;
+  uint16_t GA_IN_BRI_REL = 0, GA_IN_R_REL = 0, GA_IN_G_REL = 0, GA_IN_B_REL = 0;
+  uint16_t GA_IN_W_REL = 0, GA_IN_WW_REL = 0, GA_IN_CW_REL = 0;
+  uint16_t GA_IN_H_REL = 0, GA_IN_S_REL = 0, GA_IN_V_REL = 0, GA_IN_FX_REL = 0;
+  uint16_t GA_IN_RGB_REL = 0, GA_IN_HSV_REL = 0, GA_IN_RGBW_REL = 0;
 
   uint16_t GA_OUT_RGB = 0, GA_OUT_HSV = 0, GA_OUT_RGBW = 0;
   uint16_t GA_OUT_H = 0, GA_OUT_S = 0, GA_OUT_V = 0;
@@ -147,6 +169,18 @@ private:
   void onKnxTime_10_001(const uint8_t* p, uint8_t len);     // expects 3 bytes -> time_of_day_t
   void onKnxDate_11_001(const uint8_t* p, uint8_t len);     // expects 3 bytes -> date_t
   void onKnxDateTime_19_001(const uint8_t* p, uint8_t len); // expects 8 bytes
+  void onKnxBrightnessRel(uint8_t dpt3);
+  void onKnxColorRel(uint8_t channel, uint8_t dpt3); // channel: 0=R 1=G 2=B 3=W
+  void onKnxWhiteRel(uint8_t dpt3);
+  void onKnxWWRel(uint8_t dpt3);
+  void onKnxCWRel(uint8_t dpt3);
+  void onKnxHueRel(uint8_t dpt3);
+  void onKnxSatRel(uint8_t dpt3);
+  void onKnxValRel(uint8_t dpt3);
+  void onKnxEffectRel(uint8_t dpt3);
+  void onKnxRGBRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl);
+  void onKnxHSVRel(uint8_t hCtl, uint8_t sCtl, uint8_t vCtl);
+  void onKnxRGBWRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl, uint8_t wCtl);
 
   void evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC, bool& lastState, const char* tag);
 

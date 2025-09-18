@@ -67,13 +67,48 @@ enum class KnxService : uint8_t {
 };
 
 // DPT enums you can extend in your app
+// Primary DPT family identifiers (coarse). Only DPT_1xx is treated specially (1-bit embedding).
+// Others are semantic sugar so user code can register the correct family for clarity.
 enum class DptMain : uint16_t {
-  DPT_1xx  = 1,   // 1 bit
-  DPT_5xx  = 5,   // 8 bit (0..255 / 0..100%)
-  DPT_7xx  = 7,   // 2 byte (e.g., Kelvin / unsigned 16)
-  DPT_9xx  = 9,   // 2-byte float
-  DPT_14xx = 14,  // 4-byte float (IEEE 754)
+  DPT_1xx    = 1,    // 1 bit (on/off etc.)
+  DPT_2xx    = 2,    // (unused here; 2-bit controlled)
+  DPT_3xx    = 3,    // (unused here; 4-bit dimming steps)
+  DPT_5xx    = 5,    // 8 bit unsigned (0..255 / scaling 0..100%)
+  DPT_6xx    = 6,    // 8 bit signed (two's complement) - relative dim/color deltas
+  DPT_7xx    = 7,    // 16 bit unsigned (e.g. Kelvin)
+  DPT_8xx    = 8,    // 16 bit signed (not currently used)
+  DPT_9xx    = 9,    // 2-byte float (EIS5)
+  DPT_10xx   = 10,   // TimeOfDay (3 bytes)
+  DPT_11xx   = 11,   // Date (3 bytes)
+  DPT_12xx   = 12,   // 32 bit unsigned (not used yet)
+  DPT_13xx   = 13,   // 32 bit signed (not used yet)
+  DPT_14xx   = 14,   // 4-byte float (IEEE 754)
+  DPT_19xx   = 19,   // DateTime (8 bytes)
+  // Extended application specific composites used here:
+  DPT_232xx  = 232,  // 3-byte RGB / HSV style (DPST-232-600)
+  DPT_251xx  = 251,  // 6-byte RGBW (DPST-251-600)
 };
+
+// ---- KNX DPT 3.* (4-bit step/direction) helper ----
+// KNX standard defines the 4-bit control field layout:
+// bit3: direction (0 = decrease, 1 = increase)
+// bits2..0: step code (0 = stop, 1..7 = relative step / speed). The quantitative
+// magnitude or ramp speed associated with codes 1..7 is NOT fixed by the core
+// standard and is left to the receiving actuator. Therefore the core only
+// decodes/encodes structure; higher layers decide on percentage or ramp mapping.
+struct KnxDpt3Step {
+  bool    increase;  // true => increase, false => decrease
+  uint8_t step;      // 0=STOP, 1..7=step code
+  bool isStop() const { return step == 0; }
+};
+
+static inline KnxDpt3Step knxDecodeDpt3(uint8_t raw) {
+  return KnxDpt3Step{ (raw & 0x08)!=0, (uint8_t)(raw & 0x07) };
+}
+
+static inline uint8_t knxEncodeDpt3(const KnxDpt3Step& v) {
+  return (uint8_t)((v.increase ? 0x08 : 0x00) | (v.step & 0x07));
+}
 
 // A small description for a KNX group object we care about
 struct KnxGroupObject {
