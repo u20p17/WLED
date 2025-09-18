@@ -197,6 +197,18 @@ static int16_t knx_step_delta(uint8_t nibble, uint16_t maxVal) {
   return inc ? (int16_t)mag : -(int16_t)mag;
 }
 
+#ifdef UNIT_TEST
+// Expose internal helpers for unit tests (pure logic only)
+extern "C" {
+  uint16_t knx_test_parseGA(const char* s) { return parseGA(s); }
+  uint16_t knx_test_parsePA(const char* s) { return parsePA(s); }
+  uint8_t  knx_test_step_pct(uint8_t sc) { return knx_step_pct(sc); }
+  int16_t  knx_test_step_delta(uint8_t nibble, uint16_t maxVal) { return knx_step_delta(nibble, maxVal); }
+  void     knx_test_rgbToHsv(uint8_t r,uint8_t g,uint8_t b,float& h,float& s,float& v){ KnxIpUsermod::rgbToHsv(r,g,b,h,s,v); }
+  void     knx_test_hsvToRgb(float h,float s,float v,uint8_t& r,uint8_t& g,uint8_t& b){ KnxIpUsermod::hsvToRgb(h,s,v,r,g,b); }
+}
+#endif
+
 static inline uint8_t addClamp255(uint8_t v, int16_t delta){
   int nv = (int)v + (int)delta; if (nv<0) nv=0; else if (nv>255) nv=255; return (uint8_t)nv; }
 
