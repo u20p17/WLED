@@ -185,6 +185,7 @@ private:
   void onKnxRGBRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl);
   void onKnxHSVRel(uint8_t hCtl, uint8_t sCtl, uint8_t vCtl);
   void onKnxRGBWRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl, uint8_t wCtl);
+  void adjustWhiteSplitRel(int16_t delta, bool adjustWarm); // delta applied to derived warm (adjustWarm=true) or cold component
 
   void evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC, bool& lastState, const char* tag);
 
@@ -200,8 +201,7 @@ private:
   static inline float   byteToHueDeg(uint8_t hb) { return (hb * 360.f) / 255.f; }
   static inline uint8_t pct01ToByte(float p)     { if (p<0) p=0; if (p>1) p=1; return (uint8_t)roundf(p*255.f); }
   static inline float   byteToPct01(uint8_t b)   { return b / 255.f;   }
-  // Unified HSV application path. preserveWhite=true keeps existing independent white channel when applying new RGB.
-  void applyHSV(float hDeg, float s01, float v01, bool preserveWhite = true);
+  void applyHSV(float hDeg, float s01, float v01, bool preserveWhite = true);   // Unified HSV application path. preserveWhite=true keeps existing independent white channel when applying new RGB.
   
   bool readEspInternalTempC(float& outC) const;   // Internal_temperature_v2 only
   bool readDallasTempC(float& outC) const;        // DS18B20 usermod only

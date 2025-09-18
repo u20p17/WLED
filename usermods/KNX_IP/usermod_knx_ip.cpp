@@ -197,6 +197,38 @@ static int16_t knx_step_delta(uint8_t nibble, uint16_t maxVal) {
   return inc ? (int16_t)mag : -(int16_t)mag;
 }
 
+static inline uint8_t addClamp255(uint8_t v, int16_t delta){
+  int nv = (int)v + (int)delta; if (nv<0) nv=0; else if (nv>255) nv=255; return (uint8_t)nv; }
+
+// Adjust split white (warm/cold) by applying delta to one component, recombining to new W & CCT
+void KnxIpUsermod::adjustWhiteSplitRel(int16_t delta, bool adjustWarm) {
+  if (!delta) return;
+  Segment& seg = strip.getSegment(0);
+  uint8_t cct = seg.cct;           // 0 warm .. 255 cold ratio
+  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
+  if (w==0 && delta<0) return;     // nothing to decrease
+  // Decompose
+  uint16_t warm = (uint16_t)w * (255 - cct) / 255;
+  uint16_t cold = (uint16_t)w * cct / 255;
+  if (adjustWarm) {
+    int nwarm = (int)warm + delta; if (nwarm<0) nwarm=0; else if (nwarm>255) nwarm=255; warm = (uint16_t)nwarm;
+  } else {
+    int ncold = (int)cold + delta; if (ncold<0) ncold=0; else if (ncold>255) ncold=255; cold = (uint16_t)ncold;
+  }
+  uint16_t sum = warm + cold; if (sum>255) sum=255; // clip combined
+  uint8_t newW = (uint8_t)sum;
+  uint8_t newCct;
+  if (sum==0) newCct = cct; // keep previous ratio if all off
+  else {
+    // cold fraction scaled to 0..255
+    newCct = (uint8_t)((cold * 255u + sum/2)/sum);
+  }
+  strip.setColor(0,r,g,b,newW);
+  seg.cct = newCct;
+  colorUpdated(CALL_MODE_DIRECT_CHANGE);
+  scheduleStatePublish(true,true,false);
+}
+
 void KnxIpUsermod::onKnxBrightnessRel(uint8_t dpt3) {
   int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
   if (!d) return;
@@ -215,7 +247,7 @@ void KnxIpUsermod::onKnxColorRel(uint8_t channel, uint8_t dpt3) {
   uint8_t* tgt = nullptr;
   switch(channel){case 0: tgt=&r; break; case 1: tgt=&g; break; case 2: tgt=&b; break; case 3: tgt=&w; break;}
   if (!tgt) return;
-  int nv = (int)(*tgt) + d; if (nv<0) nv=0; else if (nv>255) nv=255; *tgt=(uint8_t)nv;
+  *tgt = addClamp255(*tgt, d);
   strip.setColor(0,r,g,b,w);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
   scheduleStatePublish(true,true,false);
@@ -223,41 +255,8 @@ void KnxIpUsermod::onKnxColorRel(uint8_t channel, uint8_t dpt3) {
 
 void KnxIpUsermod::onKnxWhiteRel(uint8_t dpt3){ onKnxColorRel(3,dpt3); }
 
-void KnxIpUsermod::onKnxWWRel(uint8_t dpt3) {
-  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
-  if (!d) return;
-  Segment& seg = strip.getSegment(0);
-  uint8_t cct = seg.cct;
-  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
-  uint16_t ww = (uint16_t)w * (255 - cct) / 255;
-  int nww = (int)ww + d; if (nww<0) nww=0; else if (nww>255) nww=255;
-  uint16_t cw = (uint16_t)w * cct / 255; // unchanged
-  uint16_t sum = (uint16_t)nww + cw;
-  uint8_t newW = sum>255?255:(uint8_t)sum;
-  uint8_t newCct = (sum==0)?cct:(uint8_t)((cw*255u + sum/2)/sum);
-  strip.setColor(0,r,g,b,newW);
-  seg.cct = newCct;
-  colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true,true,false);
-}
-
-void KnxIpUsermod::onKnxCWRel(uint8_t dpt3) {
-  int16_t d = knx_step_delta(dpt3 & 0x0F, 255);
-  if (!d) return;
-  Segment& seg = strip.getSegment(0);
-  uint8_t cct = seg.cct;
-  uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
-  uint16_t cw = (uint16_t)w * cct / 255;
-  int ncw = (int)cw + d; if (ncw<0) ncw=0; else if (ncw>255) ncw=255;
-  uint16_t ww = (uint16_t)w * (255 - cct) / 255;
-  uint16_t sum = (uint16_t)ncw + ww;
-  uint8_t newW = sum>255?255:(uint8_t)sum;
-  uint8_t newCct = (sum==0)?cct:(uint8_t)((ncw*255u + sum/2)/sum);
-  strip.setColor(0,r,g,b,newW);
-  seg.cct = newCct;
-  colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true,true,false);
-}
+void KnxIpUsermod::onKnxWWRel(uint8_t dpt3) { adjustWhiteSplitRel(knx_step_delta(dpt3 & 0x0F, 255), true); }
+void KnxIpUsermod::onKnxCWRel(uint8_t dpt3) { adjustWhiteSplitRel(knx_step_delta(dpt3 & 0x0F, 255), false); }
 
 void KnxIpUsermod::onKnxHueRel(uint8_t dpt3) {
   int16_t d = knx_step_delta(dpt3 & 0x0F, 30); // max 30-degree jump for 100%
