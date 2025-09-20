@@ -1,9 +1,13 @@
 #include "esp-knx-ip.h"
 
 // ======== Tunables / constants ========
-static constexpr uint8_t  KNX_PROTOCOL_VERSION = 0x10;   // KNXnet/IP proto version
-static constexpr uint16_t KNX_SVC_ROUTING_IND  = 0x0530; // Routing Indication (rx)
-static constexpr uint8_t  CEMI_LDATA_IND       = 0x29;   // cEMI L_Data.ind (rx)
+static constexpr uint8_t  KNX_PROTOCOL_VERSION    = 0x10;   // KNXnet/IP proto version
+static constexpr uint16_t KNX_SVC_ROUTING_IND     = 0x0530; // Routing Indication (rx)
+static constexpr uint8_t  CEMI_LDATA_IND          = 0x29;   // cEMI L_Data.ind (rx)
+static constexpr uint16_t KNX_SVC_SEARCH_REQ      = 0x0201; // SearchRequest
+static constexpr uint16_t KNX_SVC_SEARCH_RES      = 0x0202; // SearchResponse
+static constexpr uint16_t KNX_SVC_SEARCH_REQ_EXT  = 0x020B; // SearchRequestExtended
+static constexpr uint16_t KNX_SVC_SEARCH_RES_EXT  = 0x020C; // SearchResponseExtended
 
 
 // cEMI Control fields defaults:
@@ -168,7 +172,6 @@ bool KnxIpCore::groupValueResponse(uint16_t ga, const uint8_t* data, uint8_t len
   return sendCemiToGroup(ga, KnxService::GroupValue_Response, data, len);
 }
 
-
 // ======== Low-level send ========
 bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen) {
   if (!_running) {
@@ -266,8 +269,99 @@ bool KnxIpCore::sendCemiToGroup(uint16_t ga, KnxService svc, const uint8_t* asdu
   return true;
 }
 
-
 // ======== Internal RX path ========
+bool KnxIpCore::_sendSearchResponse(bool extended, const uint8_t* req, int reqLen) {
+  // --- Ziel bestimmen: Unicast zurück an den in der Anfrage angegebenen HPAI ---
+  // Für 0x0201/0x020B steht ab Offset 6 die HPAI (Len=8, IPv4/UDP, IP, Port)
+  struct sockaddr_in to{}; memset(&to, 0, sizeof(to));
+  to.sin_family = AF_INET;
+  if (reqLen >= 14 && req[0]==0x06 && req[1]==KNX_PROTOCOL_VERSION && req[6]==0x08 && req[7]==0x01) {
+    // IP (8..11), Port (12..13)
+    uint32_t ip;   memcpy(&ip,   &req[8],  4);
+    uint16_t port; memcpy(&port, &req[12], 2);
+    to.sin_addr.s_addr = ip;
+    to.sin_port        = *(uint16_t*)&req[12]; // Netzwerk-Byteordnung belassen
+  } else {
+    // Fallback (sollte nicht nötig sein)
+    to.sin_addr.s_addr = inet_addr("255.255.255.255");
+    to.sin_port        = htons(KNX_IP_UDP_PORT);
+  }
+
+  // --- HPAI (Control Endpoint) unseres Geräts ---
+  uint8_t hpai[8];
+  hpai[0] = 0x08; hpai[1] = 0x01; // len, IPv4/UDP
+  IPAddress ip = WiFi.localIP();
+  hpai[2] = ip[0]; hpai[3] = ip[1]; hpai[4] = ip[2]; hpai[5] = ip[3];
+  hpai[6] = (uint8_t)(KNX_IP_UDP_PORT >> 8);
+  hpai[7] = (uint8_t)(KNX_IP_UDP_PORT & 0xFF);
+
+  // --- DIB Device Info (Typ 0x01, fixe Länge 0x36 für Einfachheit) ---
+  uint8_t dib_dev[0x36]; memset(dib_dev, 0, sizeof(dib_dev));
+  dib_dev[0] = 0x36; dib_dev[1] = 0x01; // len, type
+  dib_dev[2] = 0x20; // Medium IP
+  dib_dev[3] = 0x00; // Device status OK
+  // PA (falls gesetzt, sonst 0)
+  dib_dev[4] = (uint8_t)(_pa >> 8);
+  dib_dev[5] = (uint8_t)(_pa & 0xFF);
+  // Project/Installation ID:
+  dib_dev[6] = 0x00; dib_dev[7] = 0x00;
+  // Seriennummer (MAC)
+  uint8_t mac[6]; WiFi.macAddress(mac);
+  memcpy(&dib_dev[8], mac, 6);
+  // Multicast 224.0.23.12
+  dib_dev[14] = 224; dib_dev[15] = 0; dib_dev[16] = 23; dib_dev[17] = 12;
+  // MAC again
+  memcpy(&dib_dev[18], mac, 6);
+  // Friendly Name (max 30B inkl. 0)
+  extern char serverDescription[33]; // kommt aus WLED core
+  const char* fallbackName = "WLED KNX";
+  const char* name = (serverDescription[0] != '\0') ? serverDescription : fallbackName;
+  strncpy((char*)&dib_dev[24], name, 30);
+  dib_dev[24 + 29] = '\0'; // sicherstellen, dass immer terminiert
+  // (Rest bleibt 0 als Padding)
+
+  // --- DIB Supported Service Families (Typ 0x02) ---
+  // Minimal: Core v1, Routing v1
+  uint8_t dib_svc[10]; memset(dib_svc, 0, sizeof(dib_svc));
+  dib_svc[0] = 0x0A; dib_svc[1] = 0x02;
+  dib_svc[2] = 0x02; dib_svc[3] = 0x01; // Core v1
+  dib_svc[4] = 0x05; dib_svc[5] = 0x01; // Routing v1
+  // Optional: kein Tunneling (lassen wir weg / v0)
+
+  // (Optional) Bei Extended Request könnte man zusätzliche DIBs anfügen.
+  // Für routing-only genügt die gleiche Antwort.
+
+  // --- KNXnet/IP Header ---
+  // 06 10 02 02/0C <len>
+  const uint16_t svc = extended ? KNX_SVC_SEARCH_RES_EXT : KNX_SVC_SEARCH_RES;
+  const size_t payloadLen = 6 + sizeof(hpai) + sizeof(dib_dev) + sizeof(dib_svc);
+  uint8_t* pkt = (uint8_t*)malloc(payloadLen);
+  if (!pkt) { KNX_LOG("SearchResponse: OOM"); return false; }
+
+  size_t p = 0;
+  pkt[p++] = 0x06; pkt[p++] = KNX_PROTOCOL_VERSION;
+  pkt[p++] = (uint8_t)(svc >> 8);
+  pkt[p++] = (uint8_t)(svc & 0xFF);
+  pkt[p++] = (uint8_t)(payloadLen >> 8);
+  pkt[p++] = (uint8_t)(payloadLen & 0xFF);
+
+  memcpy(&pkt[p], hpai, sizeof(hpai));       p += sizeof(hpai);
+  memcpy(&pkt[p], dib_dev, sizeof(dib_dev)); p += sizeof(dib_dev);
+  memcpy(&pkt[p], dib_svc, sizeof(dib_svc)); p += sizeof(dib_svc);
+
+  // --- Senden ---
+  ssize_t sent = ::sendto(_sock, pkt, payloadLen, 0, (struct sockaddr*)&to, sizeof(to));
+  bool ok = (sent == (ssize_t)payloadLen);
+  if (!ok) _txErrors++;
+  else     _txPackets++;
+  KNX_LOG("TX: %s (%u bytes) to %s:%u",
+          extended ? "SearchResponseExtended" : "SearchResponse",
+          (unsigned)payloadLen,
+          ip.toString().c_str(), KNX_IP_UDP_PORT);
+  free(pkt);
+  return ok;
+}
+
 void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
   // Validate KNXnet/IP header (min 6 bytes)
   if (len < 6) { _rxErrors++; KNX_LOG("RX: too short (%d).", len); return; }
@@ -284,11 +378,17 @@ void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
     if (totalLen > len) { _rxErrors++; KNX_LOG("RX: totalLen(%u)>len(%d).", (unsigned)totalLen, len); return; }
   }
 
-  // Only Routing Indication carries cEMI
+  // Accept SearchRequest(Extended) and Routing Indication
+  if (svc == KNX_SVC_SEARCH_REQ || svc == KNX_SVC_SEARCH_REQ_EXT) {
+    _sendSearchResponse(svc == KNX_SVC_SEARCH_REQ_EXT, buf, len);
+    return;
+  }
+
   if (svc != KNX_SVC_ROUTING_IND) {
     KNX_LOG("RX: ignore svc=0x%04X (not Routing_Ind).", (unsigned)svc);
     return;
   }
+
 
   if (len < 6 + 10) { _rxErrors++; KNX_LOG("RX: cEMI too short (len=%d).", len); return; }
 
@@ -414,8 +514,6 @@ void KnxIpCore::_handleIncoming(const uint8_t* buf, int len) {
   _rxPackets++;
   KNX_LOG("RX: done (rxPackets=%u).", (unsigned)_rxPackets);
 }
-
-
 
 // ======== Compose and send APCI ========
 bool KnxIpCore::_composeAndSendApci(uint16_t ga, KnxService svc, const uint8_t* asdu, uint8_t asduLen) {

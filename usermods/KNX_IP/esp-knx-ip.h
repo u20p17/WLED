@@ -205,6 +205,7 @@ public:
 
   bool running() const { return _running; }
   void clearRegistrations();
+  bool _sendSearchResponse(bool extended, const uint8_t* req, int reqLen);
 
    void setCommunicationEnhancement(bool enable, uint8_t count = 3, uint16_t gapMs = 0, uint16_t dedupMs = 700) {
     _enhanced = enable;

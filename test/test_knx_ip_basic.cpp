@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <cstdlib>
 #include <cmath>
+#include <vector>
+#include <cstring>
 
 extern "C" {
   uint16_t knx_test_parseGA(const char* s);
@@ -227,6 +229,105 @@ void test_hue_min_step_delta() {
   TEST_ASSERT_EQUAL_INT16(-1, knx_test_step_delta(0x0 | 7, 30));
 }
 
+// ===== SearchRequest / SearchResponse pure builder tests =====
+// We replicate the production _sendSearchResponse layout logic in a pure function.
+// This avoids Arduino/WiFi dependencies while validating packet structure.
+static void build_search_response_pure(bool extended,
+                                       const uint8_t req[], int reqLen,
+                                       const uint8_t localIp[4], const uint8_t mac[6],
+                                       std::vector<uint8_t>& out) {
+  (void)req; (void)reqLen; // For now we trust the caller passes a minimally valid request.
+  const uint16_t svc = extended ? 0x020C : 0x0202; // KNX_SVC_SEARCH_RES(_EXT)
+  // Construct HPAI
+  uint8_t hpai[8]; hpai[0]=0x08; hpai[1]=0x01; // len, IPv4/UDP
+  hpai[2]=localIp[0]; hpai[3]=localIp[1]; hpai[4]=localIp[2]; hpai[5]=localIp[3];
+  hpai[6]= (uint8_t)(3671 >> 8); hpai[7]= (uint8_t)(3671 & 0xFF);
+  // Device Info DIB (fixed 0x36)
+  uint8_t dib_dev[0x36]; memset(dib_dev,0,sizeof(dib_dev));
+  dib_dev[0]=0x36; dib_dev[1]=0x01; dib_dev[2]=0x20; dib_dev[3]=0x00; // len,type, medium, status
+  // PA left 0
+  // Project/Installation ID zero
+  memcpy(&dib_dev[8], mac, 6);                   // serial (MAC)
+  dib_dev[14]=224; dib_dev[15]=0; dib_dev[16]=23; dib_dev[17]=12; // multicast
+  memcpy(&dib_dev[18], mac, 6);                  // MAC again
+  const char* name = "WLED KNX";                // simplified name
+  strncpy((char*)&dib_dev[24], name, 30);
+  dib_dev[24+29]='\0';
+  // Supported Service Families DIB (0x0A)
+  uint8_t dib_svc[10]; memset(dib_svc,0,sizeof(dib_svc));
+  dib_svc[0]=0x0A; dib_svc[1]=0x02; // len, type
+  dib_svc[2]=0x02; dib_svc[3]=0x01; // Core v1
+  dib_svc[4]=0x05; dib_svc[5]=0x01; // Routing v1
+  // Compose full packet
+  const size_t payloadLen = 6 + sizeof(hpai) + sizeof(dib_dev) + sizeof(dib_svc);
+  out.resize(payloadLen);
+  size_t p=0;
+  out[p++]=0x06; out[p++]=0x10;
+  out[p++]= (uint8_t)(svc >> 8); out[p++]= (uint8_t)(svc & 0xFF);
+  out[p++]= (uint8_t)(payloadLen >> 8); out[p++]= (uint8_t)(payloadLen & 0xFF);
+  memcpy(&out[p], hpai, sizeof(hpai)); p+=sizeof(hpai);
+  memcpy(&out[p], dib_dev, sizeof(dib_dev)); p+=sizeof(dib_dev);
+  memcpy(&out[p], dib_svc, sizeof(dib_svc)); p+=sizeof(dib_svc);
+}
+
+static void common_assert_search_response(const std::vector<uint8_t>& pkt,
+                                          bool extended,
+                                          const uint8_t localIp[4], const uint8_t mac[6]) {
+  TEST_ASSERT_TRUE(pkt.size() > 6);
+  TEST_ASSERT_EQUAL_UINT8(0x06, pkt[0]);
+  TEST_ASSERT_EQUAL_UINT8(0x10, pkt[1]);
+  const uint16_t svc = (uint16_t(pkt[2])<<8) | pkt[3];
+  TEST_ASSERT_EQUAL_UINT16(extended?0x020C:0x0202, svc);
+  const uint16_t declaredLen = (uint16_t(pkt[4])<<8) | pkt[5];
+  TEST_ASSERT_EQUAL_UINT16(pkt.size(), declaredLen);
+  // HPAI at offset 6
+  TEST_ASSERT_EQUAL_UINT8(0x08, pkt[6]);
+  TEST_ASSERT_EQUAL_UINT8(0x01, pkt[7]);
+  TEST_ASSERT_EQUAL_UINT8(localIp[0], pkt[8]);
+  TEST_ASSERT_EQUAL_UINT8(localIp[1], pkt[9]);
+  TEST_ASSERT_EQUAL_UINT8(localIp[2], pkt[10]);
+  TEST_ASSERT_EQUAL_UINT8(localIp[3], pkt[11]);
+  TEST_ASSERT_EQUAL_UINT16(3671, (uint16_t(pkt[12])<<8)|pkt[13]);
+  // Device info DIB starts at 14
+  TEST_ASSERT_EQUAL_UINT8(0x36, pkt[14]);
+  TEST_ASSERT_EQUAL_UINT8(0x01, pkt[15]);
+  TEST_ASSERT_EQUAL_UINT8(0x20, pkt[16]); // medium
+  // Serial MAC at 22..27? (offset 14 + 8 = 22)
+  for(int i=0;i<6;i++) TEST_ASSERT_EQUAL_UINT8(mac[i], pkt[22+i]);
+  // Multicast 224.0.23.12 at offset 14+14=28
+  TEST_ASSERT_EQUAL_UINT8(224, pkt[28]);
+  TEST_ASSERT_EQUAL_UINT8(0,   pkt[29]);
+  TEST_ASSERT_EQUAL_UINT8(23,  pkt[30]);
+  TEST_ASSERT_EQUAL_UINT8(12,  pkt[31]);
+  // Supported Service Families DIB starts after 0x36 bytes: 14 + 0x36 = 68
+  const size_t svcOff = 14 + 0x36;
+  TEST_ASSERT_TRUE(pkt.size() >= svcOff + 10);
+  TEST_ASSERT_EQUAL_UINT8(0x0A, pkt[svcOff]);
+  TEST_ASSERT_EQUAL_UINT8(0x02, pkt[svcOff+1]);
+  TEST_ASSERT_EQUAL_UINT8(0x02, pkt[svcOff+2]);
+  TEST_ASSERT_EQUAL_UINT8(0x01, pkt[svcOff+3]);
+  TEST_ASSERT_EQUAL_UINT8(0x05, pkt[svcOff+4]);
+  TEST_ASSERT_EQUAL_UINT8(0x01, pkt[svcOff+5]);
+}
+
+void test_search_response_standard() {
+  uint8_t req[14] = {0x06,0x10,0x02,0x01,0x00,0x0E,0x08,0x01,192,168,0,121,0xD1,0xC2};
+  uint8_t ip[4] = {192,168,0,50};
+  uint8_t mac[6] = {0xAA,0xBB,0xCC,0x11,0x22,0x33};
+  std::vector<uint8_t> pkt;
+  build_search_response_pure(false, req, sizeof(req), ip, mac, pkt);
+  common_assert_search_response(pkt,false,ip,mac);
+}
+
+void test_search_response_extended() {
+  uint8_t req[22] = {0x06,0x10,0x02,0x0B,0x00,0x16,0x08,0x01,192,168,0,121,0xD1,0xC2,0x08,0x04,1,2,3,4,5,6};
+  uint8_t ip[4] = {10,1,2,3};
+  uint8_t mac[6] = {0xDE,0xAD,0xBE,0xEF,0x00,0x01};
+  std::vector<uint8_t> pkt;
+  build_search_response_pure(true, req, sizeof(req), ip, mac, pkt);
+  common_assert_search_response(pkt,true,ip,mac);
+}
+
 #ifndef ARDUINO
 int main() {
   UNITY_BEGIN();
@@ -255,6 +356,8 @@ int main() {
   RUN_TEST(test_hsv_rel_sv_negative_clamp);
   RUN_TEST(test_hsv_rel_multi_cycle_hue_identity);
   RUN_TEST(test_hue_min_step_delta);
+  RUN_TEST(test_search_response_standard);
+  RUN_TEST(test_search_response_extended);
   return UNITY_END();
 }
 #endif
