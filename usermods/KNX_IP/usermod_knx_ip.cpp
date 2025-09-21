@@ -1,6 +1,8 @@
 #include "usermod_knx_ip.h"
 #include "wled.h"   // access to global 'strip' and segments
 #include "DPT.h"
+#include "esp-knx-ip.h"  // for KNX_UDP_LOG macro
+#include "src/dependencies/network/Network.h"
 #include <sys/time.h>
 
 #if defined(ESP32)
@@ -1205,18 +1207,32 @@ void KnxIpUsermod::setup() {
   
     GA_OUT_INT_TEMP_ALARM, GA_OUT_TEMP_ALARM, intTempAlarmMaxC, dallasTempAlarmMaxC, tempAlarmHystC);
   // Start KNX
-  IPAddress ip = WiFi.localIP();
+  IPAddress ip = Network.localIP();
   if (!ip || ip.toString() == String("0.0.0.0")) {
-    Serial.println("[KNX-UM] WiFi connected but no IP yet, deferring KNX.begin().");
+    Serial.println("[KNX-UM] Network connected but no IP yet, deferring KNX.begin().");
     return;
   }
 
 #ifdef ARDUINO_ARCH_ESP32
-  WiFi.setSleep(false);     // modem-sleep off helps multicast reliability
+  if (Network.isEthernet()) {
+    // For Ethernet, we don't need to disable WiFi sleep
+    Serial.println("[KNX-UM] Using Ethernet connection");
+  } else {
+    WiFi.setSleep(false);     // modem-sleep off helps WiFi multicast reliability
+    Serial.println("[KNX-UM] Using WiFi connection, sleep disabled");
+  }
 #endif
 
   bool ok = KNX.begin();
   Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n", ok ? "OK" : "FAILED", ip.toString().c_str());
+  
+  // Send UDP debug for remote monitoring
+  KNX_UDP_LOG("[KNX-UM] KNX usermod setup: begin() -> %s (localIP=%s)", ok ? "OK" : "FAILED", ip.toString().c_str());
+  if (Network.isEthernet()) {
+    KNX_UDP_LOG("[KNX-UM] Network type: Ethernet");
+  } else {
+    KNX_UDP_LOG("[KNX-UM] Network type: WiFi");
+  }
 }
 
 void KnxIpUsermod::publishState() {
@@ -1374,10 +1390,10 @@ if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
   // If KNX could not start in setup() due to missing IP, retry once we have one.
   static bool knxStartedLogged = false;
   if (!knxStartedLogged) {
-    if (WiFi.status() == WL_CONNECTED) {
-      IPAddress ip = WiFi.localIP();
+    if (Network.isConnected()) {
+      IPAddress ip = Network.localIP();
       if (ip && ip.toString() != String("0.0.0.0")) {
-        Serial.println("[KNX-UM] WiFi ready (got IP). Retrying KNX.begin()...");
+        Serial.println("[KNX-UM] Network ready (got IP). Retrying KNX.begin()...");
         bool ok = KNX.begin();
         Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n",
                       ok ? "OK" : "FAILED",
@@ -1387,20 +1403,20 @@ if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
         }        
         if (ok) knxStartedLogged = true;
       } else {
-        Serial.printf("[KNX-UM] WiFi connected, waiting for IP... (status=%d)\n", (int)WiFi.status());
+        Serial.printf("[KNX-UM] Network connected, waiting for IP...\n");
       }
     } else {
-      Serial.printf("[KNX-UM] WiFi not connected yet (status=%d).\n", (int)WiFi.status());
+      Serial.printf("[KNX-UM] Network not connected yet.\n");
     }
   }
 
-  // Detect Wi-Fi IP changes and refresh IGMP membership without tearing socket down
+  // Detect network IP changes and refresh IGMP membership without tearing socket down
   static IPAddress _lastIpForKnx;
   if (KNX.running()) {
-    IPAddress cur = WiFi.localIP();
+    IPAddress cur = Network.localIP();
     if (cur && cur.toString() != String("0.0.0.0")) {
       if (_lastIpForKnx != cur) {
-        Serial.printf("[KNX-UM] WiFi IP changed %s -> %s, refreshing KNX multicast membership...\n",
+        Serial.printf("[KNX-UM] Network IP changed %s -> %s, refreshing KNX multicast membership...\n",
                       _lastIpForKnx.toString().c_str(), cur.toString().c_str());
         if (!KNX.rejoinMulticast()) {
           // Fallback: hard restart the KNX socket if rejoin fails

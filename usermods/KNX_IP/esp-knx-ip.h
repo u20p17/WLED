@@ -31,10 +31,23 @@
 #ifndef KNX_DEBUG
 #define KNX_DEBUG 1   // 1=enable Serial logs, 0=disable
 #endif
+
+#ifndef KNX_UDP_DEBUG
+#define KNX_UDP_DEBUG 0   // 1=enable UDP debug logs, 0=disable
+#endif
+
 #if KNX_DEBUG
 #  define KNX_LOG(fmt, ...) do { Serial.printf("[KNX] " fmt "\n", ##__VA_ARGS__); } while(0)
 #else
 #  define KNX_LOG(fmt, ...) do {} while(0)
+#endif
+
+#if KNX_UDP_DEBUG
+// Forward declare the UDP debug function
+extern void sendUdpDebug(const char* fmt, ...);
+#  define KNX_UDP_LOG(fmt, ...) do { sendUdpDebug("[KNX] " fmt, ##__VA_ARGS__); } while(0)
+#else
+#  define KNX_UDP_LOG(fmt, ...) do {} while(0)
 #endif
 
 #ifndef KNX_ENABLE_RUNTIME_CONFIG

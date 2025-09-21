@@ -1,4 +1,51 @@
 #include "esp-knx-ip.h"
+#ifndef UNIT_TEST
+#include "src/dependencies/network/Network.h"
+#endif
+
+// ======== UDP Debug Support ========
+#if KNX_UDP_DEBUG && !defined(UNIT_TEST)
+#include <WiFiUdp.h>
+static WiFiUDP debugUdp;
+static IPAddress debugTarget;
+static bool debugUdpInit = false;
+
+static void initUdpDebug() {
+  if (debugUdpInit) return;
+  debugTarget = IPAddress(255, 255, 255, 255); // Broadcast initially
+  debugUdp.begin(0); // Any available port
+  debugUdpInit = true;
+}
+
+void sendUdpDebug(const char* fmt, ...) {
+  if (!debugUdpInit) initUdpDebug();
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  
+  debugUdp.beginPacket(debugTarget, 5140); // Port 5140 for debug
+  debugUdp.print(buf);
+  debugUdp.endPacket();
+}
+#else
+void sendUdpDebug(const char* fmt, ...) { (void)fmt; }
+#endif
+
+// ======== Network abstraction for testing ========
+class KnxNetworkInterface {
+public:
+#ifndef UNIT_TEST
+    static IPAddress localIP() { return Network.localIP(); }
+    static void localMAC(uint8_t* mac) { Network.localMAC(mac); }
+    static bool isConnected() { return Network.isConnected(); }
+#else
+    static IPAddress localIP() { return WiFi.localIP(); }
+    static void localMAC(uint8_t* mac) { WiFi.macAddress(mac); }
+    static bool isConnected() { return WiFi.status() == WL_CONNECTED; }
+#endif
+};
 
 // ======== Tunables / constants ========
 static constexpr uint8_t  KNX_PROTOCOL_VERSION    = 0x10;   // KNXnet/IP proto version
@@ -39,15 +86,29 @@ static void knx_dump_hex(const char* tag, const uint8_t* data, size_t len) {
 
 // ======== Begin / End / Loop ========
 bool KnxIpCore::begin() {
-  if (_running) return true;
-  if (WiFi.status() != WL_CONNECTED) {
-    KNX_LOG("begin(): WiFi not connected (status=%d).", (int)WiFi.status());
+  sendUdpDebug("[KNX] KnxIpCore::begin() called");
+  if (_running) {
+    sendUdpDebug("[KNX] Already running, returning true");
+    return true;
+  }
+  if (!KnxNetworkInterface::isConnected()) {
+    sendUdpDebug("[KNX] ERROR: Network not connected");
+    KNX_LOG("begin(): Network not connected.");
     return false;
   }
 
+  IPAddress localIP = KnxNetworkInterface::localIP();
+  sendUdpDebug("[KNX] Local IP: %s", localIP.toString().c_str());
+
   // Create UDP socket
   _sock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (_sock < 0) { _rxErrors++; KNX_LOG("begin(): socket() failed errno=%d", errno); return false; }
+  if (_sock < 0) { 
+    _rxErrors++; 
+    sendUdpDebug("[KNX] ERROR: socket() failed errno=%d", errno);
+    KNX_LOG("begin(): socket() failed errno=%d", errno); 
+    return false; 
+  }
+  sendUdpDebug("[KNX] Socket created: %d", _sock);
 
   // Allow address reuse
   int yes = 1;
@@ -59,18 +120,29 @@ bool KnxIpCore::begin() {
   local.sin_port   = htons(KNX_IP_UDP_PORT);
   local.sin_addr.s_addr = htonl(INADDR_ANY);
   if (::bind(_sock, (struct sockaddr*)&local, sizeof(local)) < 0) {
-    _rxErrors++; KNX_LOG("begin(): bind() failed errno=%d", errno); ::close(_sock); _sock=-1; return false; }
+    _rxErrors++; 
+    sendUdpDebug("[KNX] ERROR: bind() failed errno=%d", errno);
+    KNX_LOG("begin(): bind() failed errno=%d", errno); 
+    ::close(_sock); _sock=-1; return false; 
+  }
+  sendUdpDebug("[KNX] Socket bound to port %d", KNX_IP_UDP_PORT);
 
 in_addr maddr{};        maddr.s_addr = inet_addr("224.0.23.12");        // KNX group
-in_addr ifaddr{};       ifaddr.s_addr = inet_addr(WiFi.localIP().toString().c_str());
+in_addr ifaddr{};       ifaddr.s_addr = inet_addr(KnxNetworkInterface::localIP().toString().c_str());
 _lastIfAddr = ifaddr;
+
+sendUdpDebug("[KNX] Joining multicast 224.0.23.12 on interface %s", KnxNetworkInterface::localIP().toString().c_str());
 
 // Join multicast group on all interfaces (or use ifaddr here if you prefer)
 ip_mreq mreq{}; 
 mreq.imr_multiaddr = maddr;
 mreq.imr_interface = ifaddr;
 if (::setsockopt(_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-  _rxErrors++; KNX_LOG("begin(): IP_ADD_MEMBERSHIP failed errno=%d", errno);
+  _rxErrors++; 
+  sendUdpDebug("[KNX] ERROR: IP_ADD_MEMBERSHIP failed errno=%d", errno);
+  KNX_LOG("begin(): IP_ADD_MEMBERSHIP failed errno=%d", errno);
+} else {
+  sendUdpDebug("[KNX] Successfully joined multicast group");
 }
 
 // TTL=1 and LOOP=1 are fine…
@@ -79,7 +151,10 @@ uint8_t loop = 1; (void)::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_LOOP, &loop
 
 // Pin outgoing multicast to the STA interface
   if (::setsockopt(_sock, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof(ifaddr)) < 0) {
+    sendUdpDebug("[KNX] ERROR: IP_MULTICAST_IF failed errno=%d", errno);
     KNX_LOG("begin(): IP_MULTICAST_IF failed errno=%d", errno);
+  } else {
+    sendUdpDebug("[KNX] Multicast interface set successfully");
   }
 // Prepare sockaddr for send()
 memset(&_mcastAddr, 0, sizeof(_mcastAddr));
@@ -92,7 +167,10 @@ _mcastAddr.sin_addr   = maddr;
 
   KNX_LOG("begin(): joined %u.%u.%u.%u:%u (sock=%d)",
           _maddr[0], _maddr[1], _maddr[2], _maddr[3],
-          (unsigned)KNX_IP_UDP_PORT, _sock);_running = true;
+          (unsigned)KNX_IP_UDP_PORT, _sock);
+  
+  _running = true;
+  sendUdpDebug("[KNX] KnxIpCore::begin() completed successfully, running=%d", _running);
   return true;
 }
 
@@ -109,7 +187,7 @@ bool KnxIpCore::rejoinMulticast() {
   }
 
   in_addr maddr{};  inet_aton("224.0.23.12", &maddr);
-  in_addr ifaddr{}; inet_aton(WiFi.localIP().toString().c_str(), &ifaddr);
+  in_addr ifaddr{}; inet_aton(KnxNetworkInterface::localIP().toString().c_str(), &ifaddr);
 
   // If interface changed, drop old membership first to avoid stale IGMP state
   if (_lastIfAddr.s_addr != 0 && _lastIfAddr.s_addr != ifaddr.s_addr) {
@@ -141,7 +219,7 @@ bool KnxIpCore::rejoinMulticast() {
   _lastIfAddr = ifaddr;
 
   KNX_LOG("rejoinMulticast(): refreshed membership for 224.0.23.12 on %s",
-          WiFi.localIP().toString().c_str());
+          KnxNetworkInterface::localIP().toString().c_str());
   return true;
 }
 
@@ -152,6 +230,14 @@ void KnxIpCore::loop() {
   struct sockaddr_in from; socklen_t flen = sizeof(from);
   int len = ::recvfrom(_sock, (char*)buf, sizeof(buf), 0, (struct sockaddr*)&from, &flen);
   if (len <= 0) return; // EWOULDBLOCK
+  
+  sendUdpDebug("[KNX] Received packet: %d bytes from %d.%d.%d.%d", 
+    len, 
+    (int)((ntohl(from.sin_addr.s_addr) >> 24) & 0xFF),
+    (int)((ntohl(from.sin_addr.s_addr) >> 16) & 0xFF), 
+    (int)((ntohl(from.sin_addr.s_addr) >> 8) & 0xFF),
+    (int)(ntohl(from.sin_addr.s_addr) & 0xFF));
+  
   // debug
   knx_dump_hex("RX packet", buf, len);
   _handleIncoming(buf, len);
@@ -290,7 +376,7 @@ bool KnxIpCore::_sendSearchResponse(bool extended, const uint8_t* req, int reqLe
   // --- HPAI (Control Endpoint) unseres Geräts ---
   uint8_t hpai[8];
   hpai[0] = 0x08; hpai[1] = 0x01; // len, IPv4/UDP
-  IPAddress ip = WiFi.localIP();
+  IPAddress ip = KnxNetworkInterface::localIP();
   hpai[2] = ip[0]; hpai[3] = ip[1]; hpai[4] = ip[2]; hpai[5] = ip[3];
   hpai[6] = (uint8_t)(KNX_IP_UDP_PORT >> 8);
   hpai[7] = (uint8_t)(KNX_IP_UDP_PORT & 0xFF);
@@ -306,7 +392,7 @@ bool KnxIpCore::_sendSearchResponse(bool extended, const uint8_t* req, int reqLe
   // Project/Installation ID:
   dib_dev[6] = 0x00; dib_dev[7] = 0x00;
   // Seriennummer (MAC)
-  uint8_t mac[6]; WiFi.macAddress(mac);
+  uint8_t mac[6]; KnxNetworkInterface::localMAC(mac);
   memcpy(&dib_dev[8], mac, 6);
   // Multicast 224.0.23.12
   dib_dev[14] = 224; dib_dev[15] = 0; dib_dev[16] = 23; dib_dev[17] = 12;
