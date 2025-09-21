@@ -68,5 +68,22 @@ extern "C" {
   void     knx_test_rgb_rel(uint8_t r,uint8_t g,uint8_t b,uint8_t rCtl,uint8_t gCtl,uint8_t bCtl,uint8_t* or_,uint8_t* og_,uint8_t* ob_){ _rgb_rel(r,g,b,rCtl,gCtl,bCtl,*or_,*og_,*ob_); }
   void     knx_test_hsv_rel(uint8_t r,uint8_t g,uint8_t b,uint8_t hCtl,uint8_t sCtl,uint8_t vCtl,uint8_t* or_,uint8_t* og_,uint8_t* ob_){ _hsv_rel(r,g,b,hCtl,sCtl,vCtl,*or_,*og_,*ob_); }
   void     knx_test_rgbw_rel(uint8_t r,uint8_t g,uint8_t b,uint8_t w,uint8_t rCtl,uint8_t gCtl,uint8_t bCtl,uint8_t wCtl,uint8_t* or_,uint8_t* og_,uint8_t* ob_,uint8_t* ow_){ _rgbw_rel(r,g,b,w,rCtl,gCtl,bCtl,wCtl,*or_,*og_,*ob_,*ow_); }
+  uint8_t  knx_test_clamp100(uint8_t v) { return (v>100)?100:v; }
+  uint8_t  knx_test_pct_to_0_255(uint8_t pct) { return (uint8_t)((pct * 255u + 50u) / 100u); }
+  uint8_t  knx_test_to_pct_0_100(uint8_t v0_255) { return (uint8_t)((v0_255 * 100u + 127u) / 255u); }
+  // CCT conversion helpers using default ranges (2700-6500K)
+  uint8_t  knx_test_kelvin_to_cct255(uint16_t k) { 
+    const uint16_t kmin = 2700, kmax = 6500;
+    if (k <= kmin) return 0;
+    if (k >= kmax) return 255;
+    uint32_t span = (uint32_t)kmax - (uint32_t)kmin;
+    uint32_t pos  = (uint32_t)k  - (uint32_t)kmin;
+    return (uint8_t)((pos * 255u + (span/2)) / span);
+  }
+  uint16_t knx_test_cct255_to_kelvin(uint8_t cct) {
+    const uint16_t kmin = 2700, kmax = 6500;
+    uint32_t span = (uint32_t)kmax - (uint32_t)kmin;
+    return (uint16_t)(kmin + (uint32_t)cct * span / 255u);
+  }
 }
 #endif // UNIT_TEST

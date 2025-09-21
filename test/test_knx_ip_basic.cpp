@@ -18,6 +18,11 @@ extern "C" {
   void     knx_test_rgb_rel(uint8_t r,uint8_t g,uint8_t b,uint8_t rCtl,uint8_t gCtl,uint8_t bCtl,uint8_t* or_,uint8_t* og_,uint8_t* ob_);
   void     knx_test_hsv_rel(uint8_t r,uint8_t g,uint8_t b,uint8_t hCtl,uint8_t sCtl,uint8_t vCtl,uint8_t* or_,uint8_t* og_,uint8_t* ob_);
   void     knx_test_rgbw_rel(uint8_t r,uint8_t g,uint8_t b,uint8_t w,uint8_t rCtl,uint8_t gCtl,uint8_t bCtl,uint8_t wCtl,uint8_t* or_,uint8_t* og_,uint8_t* ob_,uint8_t* ow_);
+  uint8_t  knx_test_clamp100(uint8_t v);
+  uint8_t  knx_test_pct_to_0_255(uint8_t pct);
+  uint8_t  knx_test_to_pct_0_100(uint8_t v0_255);
+  uint8_t  knx_test_kelvin_to_cct255(uint16_t k);
+  uint16_t knx_test_cct255_to_kelvin(uint8_t cct);
 }
 
 void test_parseGA_valid() {
@@ -32,6 +37,126 @@ void test_parseGA_invalid() {
   TEST_ASSERT_EQUAL_UINT16(0, knx_test_parseGA("1/8/1"));  // middle out of range
   TEST_ASSERT_EQUAL_UINT16(0, knx_test_parseGA("1/1/256")); // sub out of range
   TEST_ASSERT_EQUAL_UINT16(0, knx_test_parseGA("1/1")); // missing field
+}
+
+// ===== Brightness conversion tests (DPT 5.001 percentage scaling) =====
+void test_brightness_dpt5001_percent_scaling() {
+  // Test the core DPT 5.001 percentage to brightness conversion
+  // Formula: (pct * 255 + 50) / 100
+  
+  // Edge cases
+  TEST_ASSERT_EQUAL_UINT8(0, knx_test_pct_to_0_255(0));     // 0% -> 0
+  TEST_ASSERT_EQUAL_UINT8(255, knx_test_pct_to_0_255(100)); // 100% -> 255
+  
+  // 25% case that was the original issue
+  TEST_ASSERT_EQUAL_UINT8(64, knx_test_pct_to_0_255(25));   // 25% -> 64 (not 163!)
+  
+  // Additional test cases with proper rounding
+  TEST_ASSERT_EQUAL_UINT8(13, knx_test_pct_to_0_255(5));    // 5% -> 13
+  TEST_ASSERT_EQUAL_UINT8(26, knx_test_pct_to_0_255(10));   // 10% -> 26
+  TEST_ASSERT_EQUAL_UINT8(128, knx_test_pct_to_0_255(50));  // 50% -> 128
+  TEST_ASSERT_EQUAL_UINT8(191, knx_test_pct_to_0_255(75));  // 75% -> 191
+  TEST_ASSERT_EQUAL_UINT8(230, knx_test_pct_to_0_255(90));  // 90% -> 230
+}
+
+void test_brightness_over_100_clamped() {
+  // Test clamp100 function - values over 100 should be clamped to 100
+  TEST_ASSERT_EQUAL_UINT8(100, knx_test_clamp100(150));
+  TEST_ASSERT_EQUAL_UINT8(100, knx_test_clamp100(255));
+  TEST_ASSERT_EQUAL_UINT8(75, knx_test_clamp100(75));   // values <= 100 unchanged
+  TEST_ASSERT_EQUAL_UINT8(0, knx_test_clamp100(0));
+  
+  // Test the complete conversion chain: clamp then convert
+  // If someone sends 150 as DPT 5.001, it should be treated as 100%
+  uint8_t clamped = knx_test_clamp100(150);
+  uint8_t brightness = knx_test_pct_to_0_255(clamped);
+  TEST_ASSERT_EQUAL_UINT8(255, brightness);
+}
+
+void test_brightness_roundtrip_conversion() {
+  // Test round-trip: brightness -> percentage -> brightness
+  TEST_ASSERT_EQUAL_UINT8(0, knx_test_to_pct_0_100(0));     // 0 -> 0% -> 0
+  TEST_ASSERT_EQUAL_UINT8(100, knx_test_to_pct_0_100(255)); // 255 -> 100% -> 255
+  
+  // Test some intermediate values
+  uint8_t pct25 = knx_test_to_pct_0_100(64);  // 64 -> should be ~25%
+  TEST_ASSERT_EQUAL_UINT8(25, pct25);
+  
+  uint8_t pct50 = knx_test_to_pct_0_100(128); // 128 -> should be ~50%
+  TEST_ASSERT_EQUAL_UINT8(50, pct50);
+}
+
+// ===== CCT conversion tests (DPT 7.600 Kelvin <-> 0-255 CCT) =====
+void test_cct_kelvin_to_255_conversion() {
+  // Test standard CCT range conversion (2700K-6500K -> 0-255)
+  TEST_ASSERT_EQUAL_UINT8(0, knx_test_kelvin_to_cct255(2700));     // Min Kelvin -> 0 (warm)
+  TEST_ASSERT_EQUAL_UINT8(255, knx_test_kelvin_to_cct255(6500));   // Max Kelvin -> 255 (cold)
+  
+  // Test middle value (allow 1 unit tolerance for rounding)
+  uint8_t mid_cct = knx_test_kelvin_to_cct255(4600);
+  TEST_ASSERT_TRUE(mid_cct >= 127 && mid_cct <= 128);              // Middle -> ~127-128
+  
+  // Test boundary conditions
+  TEST_ASSERT_EQUAL_UINT8(0, knx_test_kelvin_to_cct255(2000));     // Below min -> 0
+  TEST_ASSERT_EQUAL_UINT8(255, knx_test_kelvin_to_cct255(7000));   // Above max -> 255
+  
+  // Test common values (with tolerance)
+  uint8_t quarter_cct = knx_test_kelvin_to_cct255(3650);
+  TEST_ASSERT_TRUE(quarter_cct >= 63 && quarter_cct <= 65);        // Quarter point -> ~64 ± 1
+  
+  uint8_t three_quarter_cct = knx_test_kelvin_to_cct255(5550);
+  TEST_ASSERT_TRUE(three_quarter_cct >= 190 && three_quarter_cct <= 192); // Three-quarter point -> ~191 ± 1
+}
+
+void test_cct_255_to_kelvin_conversion() {
+  // Test reverse conversion (0-255 -> 2700K-6500K)
+  TEST_ASSERT_EQUAL_UINT16(2700, knx_test_cct255_to_kelvin(0));    // 0 -> 2700K (warm)
+  TEST_ASSERT_EQUAL_UINT16(6500, knx_test_cct255_to_kelvin(255));  // 255 -> 6500K (cold)
+  
+  // Test middle value
+  uint16_t mid_kelvin = knx_test_cct255_to_kelvin(127);
+  TEST_ASSERT_TRUE(mid_kelvin >= 4580 && mid_kelvin <= 4620);      // ~4600K ± tolerance
+  
+  // Test quarter and three-quarter points
+  uint16_t quarter_kelvin = knx_test_cct255_to_kelvin(64);
+  TEST_ASSERT_TRUE(quarter_kelvin >= 3620 && quarter_kelvin <= 3680); // ~3650K ± tolerance
+  
+  uint16_t three_quarter_kelvin = knx_test_cct255_to_kelvin(191);
+  TEST_ASSERT_TRUE(three_quarter_kelvin >= 5520 && three_quarter_kelvin <= 5580); // ~5550K ± tolerance
+}
+
+void test_cct_roundtrip_conversion() {
+  // Test round-trip conversion: Kelvin -> CCT255 -> Kelvin
+  uint16_t test_kelvins[] = {2700, 3000, 4000, 5000, 6000, 6500};
+  
+  for (size_t i = 0; i < sizeof(test_kelvins)/sizeof(test_kelvins[0]); i++) {
+    uint16_t original = test_kelvins[i];
+    uint8_t cct = knx_test_kelvin_to_cct255(original);
+    uint16_t converted_back = knx_test_cct255_to_kelvin(cct);
+    
+    // Allow small tolerance due to rounding
+    int16_t diff = (int16_t)converted_back - (int16_t)original;
+    TEST_ASSERT_TRUE(abs(diff) <= 20); // Within 20K tolerance
+  }
+}
+
+// ===== Individual Address (PA) parsing tests =====
+void test_parsePA_valid() {
+  // Test valid PA format "area.line.device" -> (area<<12)|(line<<8)|device
+  TEST_ASSERT_EQUAL_UINT16((1U<<12)|(2U<<8)|3U, knx_test_parsePA("1.2.3"));
+  TEST_ASSERT_EQUAL_UINT16((15U<<12)|(15U<<8)|255U, knx_test_parsePA("15.15.255"));
+  TEST_ASSERT_EQUAL_UINT16((0U<<12)|(0U<<8)|1U, knx_test_parsePA("0.0.1"));
+}
+
+void test_parsePA_invalid() {
+  // Test invalid PA formats
+  TEST_ASSERT_EQUAL_UINT16(0, knx_test_parsePA(""));
+  TEST_ASSERT_EQUAL_UINT16(0, knx_test_parsePA("a.b.c"));
+  TEST_ASSERT_EQUAL_UINT16(0, knx_test_parsePA("16.1.1")); // area out of range (>15)
+  TEST_ASSERT_EQUAL_UINT16(0, knx_test_parsePA("1.16.1")); // line out of range (>15)
+  TEST_ASSERT_EQUAL_UINT16(0, knx_test_parsePA("1.1.256")); // device out of range (>255)
+  TEST_ASSERT_EQUAL_UINT16(0, knx_test_parsePA("1.1")); // missing field
+  TEST_ASSERT_EQUAL_UINT16(0, knx_test_parsePA("1/1/1")); // wrong separator
 }
 
 void test_step_pct_mapping() {
@@ -333,6 +458,14 @@ int main() {
   UNITY_BEGIN();
   RUN_TEST(test_parseGA_valid);
   RUN_TEST(test_parseGA_invalid);
+  RUN_TEST(test_parsePA_valid);
+  RUN_TEST(test_parsePA_invalid);
+  RUN_TEST(test_brightness_dpt5001_percent_scaling);
+  RUN_TEST(test_brightness_over_100_clamped);
+  RUN_TEST(test_brightness_roundtrip_conversion);
+  RUN_TEST(test_cct_kelvin_to_255_conversion);
+  RUN_TEST(test_cct_255_to_kelvin_conversion);
+  RUN_TEST(test_cct_roundtrip_conversion);
   RUN_TEST(test_step_pct_mapping);
   RUN_TEST(test_step_delta_inc_dec);
   RUN_TEST(test_hsv_roundtrip_primary_colors);

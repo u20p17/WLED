@@ -208,6 +208,23 @@ extern "C" {
   int16_t  knx_test_step_delta(uint8_t nibble, uint16_t maxVal) { return knx_step_delta(nibble, maxVal); }
   void     knx_test_rgbToHsv(uint8_t r,uint8_t g,uint8_t b,float& h,float& s,float& v){ KnxIpUsermod::rgbToHsv(r,g,b,h,s,v); }
   void     knx_test_hsvToRgb(float h,float s,float v,uint8_t& r,uint8_t& g,uint8_t& b){ KnxIpUsermod::hsvToRgb(h,s,v,r,g,b); }
+  uint8_t  knx_test_clamp100(uint8_t v) { return clamp100(v); }
+  uint8_t  knx_test_pct_to_0_255(uint8_t pct) { return pct_to_0_255(pct); }
+  uint8_t  knx_test_to_pct_0_100(uint8_t v0_255) { return to_pct_0_100(v0_255); }
+  // CCT conversion helpers using default ranges (2700-6500K)
+  uint8_t  knx_test_kelvin_to_cct255(uint16_t k) { 
+    const uint16_t kmin = 2700, kmax = 6500;
+    if (k <= kmin) return 0;
+    if (k >= kmax) return 255;
+    uint32_t span = (uint32_t)kmax - (uint32_t)kmin;
+    uint32_t pos  = (uint32_t)k  - (uint32_t)kmin;
+    return (uint8_t)((pos * 255u + (span/2)) / span);
+  }
+  uint16_t knx_test_cct255_to_kelvin(uint8_t cct) {
+    const uint16_t kmin = 2700, kmax = 6500;
+    uint32_t span = (uint32_t)kmax - (uint32_t)kmin;
+    return (uint16_t)(kmin + (uint32_t)cct * span / 255u);
+  }
 }
 #endif
 
