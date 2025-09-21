@@ -172,8 +172,22 @@ void KnxIpUsermod::onKnxBrightness(uint8_t pct) {
 
 void KnxIpUsermod::onKnxRGB(uint8_t r, uint8_t g, uint8_t b) {
   uint8_t cr,cg,cb,cw; getCurrentRGBW(cr,cg,cb,cw);
-  strip.setColor(0, r, g, b, cw); // preserve existing white
-  colorUpdated(CALL_MODE_DIRECT_CHANGE);
+  Serial.printf("[KNX-UM] onKnxRGB: R=%d G=%d B=%d -> setting R=%d G=%d B=%d W=%d\n", r, g, b, r, g, b, cw);
+  Serial.printf("[KNX-UM] onKnxRGB: Current WLED state: bri=%d, on=%d\n", bri, (bri > 0));
+  
+  // Set the color on the segment
+  uint32_t newColor = RGBW32(r, g, b, cw);
+  strip.getMainSegment().setColor(0, newColor);
+  
+  // Update global color variables for GUI synchronization
+  colPri[0] = r;
+  colPri[1] = g; 
+  colPri[2] = b;
+  colPri[3] = cw;
+  
+  Serial.printf("[KNX-UM] onKnxRGB: segment color and global colPri updated, calling stateUpdated()\n");
+  stateUpdated(CALL_MODE_DIRECT_CHANGE);
+  Serial.printf("[KNX-UM] onKnxRGB: stateUpdated() called, scheduling state publish\n");
   scheduleStatePublish(true, true, false);
 }
 
@@ -987,6 +1001,10 @@ void KnxIpUsermod::setup() {
   GA_IN_RGB_REL  = parseGA(gaInRGBRel);
   GA_IN_HSV_REL  = parseGA(gaInHSVRel);
   GA_IN_RGBW_REL = parseGA(gaInRGBWRel);
+  
+  // Debug: Log composite group addresses
+  Serial.printf("[KNX-UM] COMPOSITE: RGB=0x%04X HSV=0x%04X RGBW=0x%04X RGB_REL=0x%04X HSV_REL=0x%04X RGBW_REL=0x%04X\n",
+                GA_IN_RGB, GA_IN_HSV, GA_IN_RGBW, GA_IN_RGB_REL, GA_IN_HSV_REL, GA_IN_RGBW_REL);
   GA_IN_H    = parseGA(gaInH);
   GA_IN_S    = parseGA(gaInS);
   GA_IN_V    = parseGA(gaInV);
@@ -1018,12 +1036,19 @@ void KnxIpUsermod::setup() {
      g_ledProfile==LedProfile::RGBW?"RGBW":"RGBCCT"),
     (int)allowRGB,(int)allowW,(int)allowCCT);
 
-  if (!allowRGB) { GA_IN_R = GA_IN_G = GA_IN_B = GA_IN_R_REL = GA_IN_G_REL = GA_IN_B_REL = GA_IN_RGB = 
+  if (!allowRGB) { 
+    Serial.printf("[KNX-UM] DEBUG: allowRGB=false, disabling RGB group addresses\n");
+    GA_IN_R = GA_IN_G = GA_IN_B = GA_IN_R_REL = GA_IN_G_REL = GA_IN_B_REL = GA_IN_RGB = 
                     GA_IN_HSV = GA_IN_H = GA_IN_S = GA_IN_V = GA_IN_H_REL = GA_IN_S_REL = GA_IN_V_REL = 
-                    GA_IN_RGB_REL = GA_IN_HSV_REL = 0;  }
+                    GA_IN_RGB_REL = GA_IN_HSV_REL = 0;  } else {
+    Serial.printf("[KNX-UM] DEBUG: allowRGB=true, RGB group addresses enabled\n");
+  }
   if (!allowW)   { GA_IN_W = GA_IN_W_REL = 0; }
   if (!allowCCT) { GA_IN_CCT = GA_IN_WW = GA_IN_CW = GA_IN_WW_REL = GA_IN_CW_REL = 0; }
   if (!(g_ledProfile == LedProfile::RGBW || g_ledProfile == LedProfile::RGBCCT)) { GA_IN_RGBW = GA_IN_RGBW_REL = 0; }
+
+  // Debug: Final values after allowRGB logic
+  Serial.printf("[KNX-UM] FINAL: RGB=0x%04X HSV=0x%04X RGBW=0x%04X\n", GA_IN_RGB, GA_IN_HSV, GA_IN_RGBW);
 
   // Optional additional inputs registered separately (will be skipped if masked above)
   GA_IN_W   = parseGA(gaInW);
@@ -1051,7 +1076,13 @@ void KnxIpUsermod::setup() {
   }
 
   if (GA_IN_RGB) {
-    registerMultiHandler(GA_IN_RGB, DptMain::DPT_232xx, 3, [this](const uint8_t* p){ onKnxRGB(p[0],p[1],p[2]); });
+    Serial.printf("[KNX-UM] DEBUG: Registering RGB handler for GA 0x%04X\n", GA_IN_RGB);
+    registerMultiHandler(GA_IN_RGB, DptMain::DPT_232xx, 3, [this](const uint8_t* p){ 
+      Serial.printf("[KNX-UM] DEBUG: RGB callback triggered with data: %02X %02X %02X\n", p[0], p[1], p[2]);
+      onKnxRGB(p[0],p[1],p[2]); 
+    });
+  } else {
+    Serial.printf("[KNX-UM] DEBUG: GA_IN_RGB is 0, not registering RGB handler\n");
   }
   if (GA_IN_HSV) {
     registerMultiHandler(GA_IN_HSV, DptMain::DPT_232xx, 3, [this](const uint8_t* p){
