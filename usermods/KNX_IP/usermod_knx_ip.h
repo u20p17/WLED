@@ -85,6 +85,12 @@ public:
   // TX coalescing
   uint16_t txRateLimitMs = 200;
 
+  // Color output mode (to limit traffic)
+  // 0 = per-channel only (R,G,B,W,CCT,WW,CW,H,S,V)
+  // 1 = composite only (RGB, HSV, RGBW, plus H/S/V if individually configured?)
+  // 2 = both (default, current behaviour)
+  uint8_t  colorOutMode = 2;  
+
   // Periodic state publish (optional)
   bool     periodicEnabled    = false;
   uint32_t periodicIntervalMs = 10000; // 10s
@@ -119,6 +125,8 @@ private:
   unsigned long _nextTxAt = 0;
   bool _pendingTxPower = false, _pendingTxBri = false, _pendingTxFx = false;
   uint32_t _lastPeriodicMs = 0;   // last time we scheduled a periodic publish
+  // Diagnostics: count how many times publishState() actually runs
+  uint32_t _publishSeq = 0;
   
   // --- GA caches ---
   uint16_t GA_IN_W   = 0, GA_IN_CCT = 0, GA_IN_WW = 0, GA_IN_CW = 0;
@@ -153,7 +161,7 @@ private:
 
   // Outbound state
   void publishState();
-  void scheduleStatePublish(bool pwr, bool bri, bool fx);
+  void scheduleStatePublish();
 
   // handlers (KNX -> WLED)
   void onKnxPower(bool on);
@@ -205,7 +213,8 @@ private:
   
   bool readEspInternalTempC(float& outC) const;   // Internal_temperature_v2 only
   bool readDallasTempC(float& outC) const;        // DS18B20 usermod only
-  void publishTemperatureOnce();                  // send each to its own GA
+  void publishTemperatureIfChanged();             // send only if temperature actually changed
+ 
 
   // mapping helpers
   uint8_t  kelvinToCct255(uint16_t k) const;

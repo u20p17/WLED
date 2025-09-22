@@ -42,8 +42,22 @@ static LedProfile detectLedProfileFromSegments() {
   return LedProfile::MONO;
 }
 
-// Track last-sent preset so we only transmit GA_OUT_PRE when it changes
-static uint8_t s_lastPresetSent = 0xFF;
+// Track last-sent preset so we only transmit GA_OUT_PRE when it changes  
+static int s_lastPresetSent = -1; // -1 sentinel; currentPreset is byte
+
+// Global state tracking for scheduleStatePublish
+static uint8_t g_lastScheduleBri = 255; // sentinel
+static bool g_lastScheduleOn = true;    // sentinel  
+static uint8_t g_lastScheduleFx = 255;  // sentinel
+static uint8_t g_lastScheduleCct = 255; // sentinel for CCT
+static uint8_t g_lastScheduleR = 255;   // sentinel for R
+static uint8_t g_lastScheduleG = 255;   // sentinel for G
+static uint8_t g_lastScheduleB = 255;   // sentinel for B
+static uint8_t g_lastScheduleW = 255;   // sentinel for W
+static uint8_t g_lastSchedulePreset = 255; // sentinel for preset
+static bool g_firstCall = true;
+static float g_lastEspTemp = -999.0f;     // sentinel for ESP internal temp
+static float g_lastDallasTemp = -999.0f;  // sentinel for Dallas temp
 
 static void getCurrentRGBW(uint8_t &r, uint8_t &g, uint8_t &b, uint8_t &w) {
   uint32_t c = SEGCOLOR(0); // primary color slot
@@ -159,7 +173,7 @@ void KnxIpUsermod::onKnxPower(bool on) {
     bri = 0;
   }
   stateUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, true);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxBrightness(uint8_t pct) {
@@ -167,7 +181,7 @@ void KnxIpUsermod::onKnxBrightness(uint8_t pct) {
   bri = pct_to_0_255(pct);
   if (bri > 0) strip.setBrightness(bri);
   stateUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, true);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxRGB(uint8_t r, uint8_t g, uint8_t b) {
@@ -188,13 +202,13 @@ void KnxIpUsermod::onKnxRGB(uint8_t r, uint8_t g, uint8_t b) {
   Serial.printf("[KNX-UM] onKnxRGB: segment color and global colPri updated, calling stateUpdated()\n");
   stateUpdated(CALL_MODE_DIRECT_CHANGE);
   Serial.printf("[KNX-UM] onKnxRGB: stateUpdated() called, scheduling state publish\n");
-  scheduleStatePublish(true, true, false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxEffect(uint8_t fxIndex) {
   strip.setMode(0, fxIndex);
   stateUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(false, false, true);
+  scheduleStatePublish();
 }
 
 // ---------------- Relative handlers (DPT 3.007) -----------------
@@ -271,7 +285,7 @@ void KnxIpUsermod::adjustWhiteSplitRel(int16_t delta, bool adjustWarm) {
   strip.setColor(0,r,g,b,newW);
   seg.cct = newCct;
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true,true,false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxBrightnessRel(uint8_t dpt3) {
@@ -282,7 +296,7 @@ void KnxIpUsermod::onKnxBrightnessRel(uint8_t dpt3) {
   bri = (uint8_t)val;
   if (bri > 0) strip.setBrightness(bri);
   stateUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, true);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxColorRel(uint8_t channel, uint8_t dpt3) {
@@ -295,7 +309,7 @@ void KnxIpUsermod::onKnxColorRel(uint8_t channel, uint8_t dpt3) {
   *tgt = addClamp255(*tgt, d);
   strip.setColor(0,r,g,b,w);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true,true,false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxWhiteRel(uint8_t dpt3){ onKnxColorRel(3,dpt3); }
@@ -344,7 +358,7 @@ void KnxIpUsermod::onKnxRGBRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl) {
   if (db) { int v = (int)b + db; if (v<0) v=0; else if (v>255) v=255; b=(uint8_t)v; }
   strip.setColor(0,r,g,b,w);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true,true,false);
+  scheduleStatePublish();
 }
 
 // HSV relative: 3 bytes [Hctl, Sctl, Vctl]
@@ -375,27 +389,27 @@ void KnxIpUsermod::onKnxRGBWRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl, uint8_
   if (dw) { int v = (int)w + dw; if (v<0) v=0; else if (v>255) v=255; w=(uint8_t)v; }
   strip.setColor(0,r,g,b,w);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true,true,false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxPreset(uint8_t preset) {
   _lastPreset = preset;    // remember for status OUT
   applyPreset(preset);
-  scheduleStatePublish(true, true, true);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxWhite(uint8_t v) {            // 0..255 (DPT 5.010)
   uint8_t r,g,b,w; getCurrentRGBW(r,g,b,w);
   strip.setColor(0, r, g, b, v);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxCct(uint16_t kelvin) {        // Kelvin (DPT 7.600)
   Segment& seg = strip.getSegment(0);
   seg.cct = kelvinToCct255(kelvin);
   stateUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::applyWhiteAndCct() {
@@ -422,7 +436,7 @@ void KnxIpUsermod::onKnxWW(uint8_t v) {               // 0..255 (DPT 5.010)
   strip.getSegment(0).cct = newCct;
 
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxCW(uint8_t v) {               // 0..255 (DPT 5.010)
@@ -442,13 +456,13 @@ void KnxIpUsermod::onKnxCW(uint8_t v) {               // 0..255 (DPT 5.010)
   strip.getSegment(0).cct = newCct;
 
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxRGBW(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
   strip.setColor(0, r, g, b, w);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::hsvToRgb(float h, float s, float v, uint8_t& r, uint8_t& g, uint8_t& b) {
@@ -492,7 +506,7 @@ void KnxIpUsermod::applyHSV(float hDeg, float s01, float v01, bool preserveWhite
   if (!preserveWhite) cw = 0; // optional future use; currently always true
   strip.setColor(0, r, g, b, cw);
   colorUpdated(CALL_MODE_DIRECT_CHANGE);
-  scheduleStatePublish(true, true, false);
+  scheduleStatePublish();
 }
 
 void KnxIpUsermod::onKnxH(float hDeg) {
@@ -547,43 +561,51 @@ bool KnxIpUsermod::readDallasTempC(float& outC) const {
   return false;
 }
 
-void KnxIpUsermod::publishTemperatureOnce() {
+void KnxIpUsermod::publishTemperatureIfChanged() {
   if (!KNX.running()) {
-    Serial.printf("skip: KNX not running\n");
     return;
   }
 
-  // ESP32 internal -> GA_OUT_INT_TEMP
+  Serial.printf("[KNX-UM][TEMP] publishTemperatureIfChanged() called\n");
+
+  bool anyTempChanged = false;
+
+  // Check ESP internal temperature
   if (GA_OUT_INT_TEMP) {
     float tEsp;
     if (readEspInternalTempC(tEsp)) {
-      uint8_t buf[4];
-      KnxIpCore::pack4ByteFloat(tEsp, buf);
-      bool ok = KNX.groupValueWrite(GA_OUT_INT_TEMP, buf, 4);
-      Serial.printf("TX ESP internal Temp: %.1f °C (%s)\n", tEsp, ok ? "OK" : "FAIL");
-      evalAndPublishTempAlarm(GA_OUT_INT_TEMP_ALARM, tEsp, intTempAlarmMaxC, lastIntTempAlarmState, "ESP-int");
-    } else {
-      Serial.printf("skip ESP internal Temp: no value\n");
+      // Compare with last published value (with 0.1°C tolerance for floating point)
+      if (g_firstCall || fabs(tEsp - g_lastEspTemp) >= 0.05f) {
+        uint8_t buf[4];
+        KnxIpCore::pack4ByteFloat(tEsp, buf);
+        bool ok = KNX.groupValueWrite(GA_OUT_INT_TEMP, buf, 4);
+        Serial.printf("TX ESP internal Temp: %.1f °C (%s)\n", tEsp, ok ? "OK" : "FAIL");
+        evalAndPublishTempAlarm(GA_OUT_INT_TEMP_ALARM, tEsp, intTempAlarmMaxC, lastIntTempAlarmState, "ESP-int");
+        g_lastEspTemp = tEsp;
+        anyTempChanged = true;
+      }
     }
   }
-  
 
-  // Dallas DS18B20 -> GA_OUT_TEMP
+  // Check Dallas temperature
   if (GA_OUT_TEMP) {
     float tDallas;
     if (readDallasTempC(tDallas)) {
-      uint8_t buf[4];
-      KnxIpCore::pack4ByteFloat(tDallas, buf);
-      bool ok = KNX.groupValueWrite(GA_OUT_TEMP, buf, 4);
-      Serial.printf("TX Dallas Temp: %.1f °C (%s)\n", tDallas, ok ? "OK" : "FAIL");
-      evalAndPublishTempAlarm(GA_OUT_TEMP_ALARM, tDallas, dallasTempAlarmMaxC, lastDallasTempAlarmState, "Dallas");
-    } else {
-      Serial.printf("skip Dallas Temp: no value\n");
+      // Compare with last published value (with 0.1°C tolerance for floating point)
+      if (g_firstCall || fabs(tDallas - g_lastDallasTemp) >= 0.05f) {
+        uint8_t buf[4];
+        KnxIpCore::pack4ByteFloat(tDallas, buf);
+        bool ok = KNX.groupValueWrite(GA_OUT_TEMP, buf, 4);
+        Serial.printf("TX Dallas Temp: %.1f °C (%s)\n", tDallas, ok ? "OK" : "FAIL");
+        evalAndPublishTempAlarm(GA_OUT_TEMP_ALARM, tDallas, dallasTempAlarmMaxC, lastDallasTempAlarmState, "Dallas");
+        g_lastDallasTemp = tDallas;
+        anyTempChanged = true;
+      }
     }
   }
 
-  if (!GA_OUT_INT_TEMP && !GA_OUT_TEMP) {
-    Serial.printf("skip: no temperature GAs configured\n");
+  if (!anyTempChanged && !g_firstCall) {
+    Serial.printf("[KNX-UM][TEMP] No temperature changes detected - skipping publish\n");
   }
 }
 
@@ -1284,6 +1306,17 @@ void KnxIpUsermod::setup() {
 }
 
 void KnxIpUsermod::publishState() {
+  // Safety check: ensure KNX is running before any operations
+  if (!enabled || !KNX.running()) {
+    Serial.printf("[KNX-UM] publishState() aborted - KNX not running (enabled=%d, running=%d)\n", 
+                  enabled, KNX.running());
+    return;
+  }
+  _publishSeq++;
+  unsigned long nowMs = millis();
+  Serial.printf("[KNX-UM] publishState(seq=%lu at %lums) pending: pwr=%d bri=%d fx=%d\n", 
+                (unsigned long)_publishSeq, nowMs, _pendingTxPower, _pendingTxBri, _pendingTxFx);
+                
   // If nothing is pending and no OUT GAs are configured, bail early
   const bool anyPending  = _pendingTxPower || _pendingTxBri || _pendingTxFx;
   const bool anyColorOut = (GA_OUT_R || GA_OUT_G || GA_OUT_B || GA_OUT_W || GA_OUT_CCT || GA_OUT_WW || GA_OUT_CW);
@@ -1311,8 +1344,14 @@ void KnxIpUsermod::publishState() {
 
   const bool anyColorChanged = chR || chG || chB || chW || chCct || chWW || chCW;
 
-  if (!anyPending && !anyColorOut && !GA_OUT_PRE) return;
-  if (!anyPending && !anyColorChanged && !GA_OUT_PRE) return; // nothing to send
+  if (!anyPending && !anyColorOut && !GA_OUT_PRE) {
+    Serial.println("[KNX-UM] publishState() early exit - nothing configured pending");
+    return;
+  }
+  if (!anyPending && !anyColorChanged && !GA_OUT_PRE) {
+    Serial.println("[KNX-UM] publishState() early exit - no changes detected");
+    return; // nothing to send
+  }
 
   // Base state
   const bool    pwr     = (bri > 0);
@@ -1328,7 +1367,9 @@ void KnxIpUsermod::publishState() {
   }
 
   // Colors / White / CCT / WW / CW — only if changed
-  if (anyColorOut) {
+  if (anyColorOut && colorOutMode != 1) { // skip individual channels if composite-only mode
+    Serial.printf("[KNX-UM] Color change flags R=%d G=%d B=%d W=%d CCT=%d WW=%d CW=%d (anyColorChanged=%d)\n", 
+                  chR, chG, chB, chW, chCct, chWW, chCW, anyColorChanged);
     if (chR)   { uint8_t v=r;   KNX.groupValueWrite(GA_OUT_R,   &v, 1); }
     if (chG)   { uint8_t v=g;   KNX.groupValueWrite(GA_OUT_G,   &v, 1); }
     if (chB)   { uint8_t v=b;   KNX.groupValueWrite(GA_OUT_B,   &v, 1); }
@@ -1342,7 +1383,7 @@ void KnxIpUsermod::publishState() {
     if (chCW)  { uint8_t v=cw;  KNX.groupValueWrite(GA_OUT_CW,  &v, 1); }
   }
 
-  if (anyColorChanged) {
+  if (anyColorChanged && colorOutMode != 0) { // skip composites if per-channel-only mode
     // Snapshot again (already have r,g,b,w,cct)
     // 1) RGB (DPST-232-600) 3 bytes
     if (GA_OUT_RGB) {
@@ -1375,14 +1416,16 @@ void KnxIpUsermod::publishState() {
     }
   }
 
-  // Publish temperature if configured and available
-  publishTemperatureOnce();
+  // Publish temperature only if it actually changed
+  publishTemperatureIfChanged();
 
   // Update “last published” snapshot for color/CCT
   LAST_R = r; LAST_G = g; LAST_B = b; LAST_W = w; LAST_CCT = cct;
 
   // Clear pending flags after publish
   _pendingTxPower = _pendingTxBri = _pendingTxFx = false;
+  Serial.printf("[KNX-UM] publishState(seq=%lu) done. Snapshot R=%u G=%u B=%u W=%u CCT=%u bri=%u on=%u\n", 
+                (unsigned long)_publishSeq, r, g, b, w, cct, bri, (bri>0));
 }
 
 void KnxIpUsermod::loop() {
@@ -1446,9 +1489,6 @@ if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
         Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n",
                       ok ? "OK" : "FAILED",
                       ip.toString().c_str());
-        if (ok) {
-          publishState(); // send immediate Power + Dim so we have TX to see in Wireshark
-        }        
         if (ok) knxStartedLogged = true;
       } else {
         Serial.printf("[KNX-UM] Network connected, waiting for IP...\n");
@@ -1478,14 +1518,12 @@ if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
 
   KNX.loop();
 
-  // Publish immediately when GUI changed brightness/power/CCT/RGBW (debounced)
-  bool curOn = (bri > 0);
+  // Detect state changes for immediate GUI-driven changes (CCT/RGBW/Presets only)
   const Segment& seg = strip.getSegment(0);
   uint8_t curCct = seg.cct; // 0..255 (0=warm .. 255=cold)
   const uint32_t c = seg.colors[0];
   uint8_t r = R(c), g = G(c), b = B(c), w = W(c);
 
-  bool briOrPwrChanged = (curOn != _lastSentOn) || (bri != _lastSentBri);
   bool cctChanged      = (curCct != LAST_CCT);
   bool rgbwChanged     = (r != LAST_R) || (g != LAST_G) || (b != LAST_B) || (w != LAST_W);
 
@@ -1495,75 +1533,139 @@ if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
   uint16_t minInterval = _minUiSendIntervalMs;
   if (effectCurrent != 0) minInterval = 1000;  // be gentler while an effect runs
 
-  if ((briOrPwrChanged || cctChanged || rgbwChanged) && (now - _lastUiSendMs >= minInterval)) {
+  // Handle immediate GUI-driven changes that can't wait for scheduled publish
+  if ((cctChanged || rgbwChanged) && (now - _lastUiSendMs >= minInterval)) {
     _lastUiSendMs = now;
-
-    // If brightness/power changed, make sure those GAs get sent even if no color changed
-    if (_lastSentOn != curOn) {
-      _pendingTxPower = true;   // just power on toggle
-    } 
-    if (bri != _lastSentBri){
-      _pendingTxBri = true;     // brightness changed
-    }
-
-    // Debug trace so you can see what triggered the TX
-    Serial.printf("[KNX-UM] GUI change -> publish (%s%s%s) bri %u→%u, on %u→%u, cct %u→%u, "
-                "RGBW %u,%u,%u,%u → %u,%u,%u,%u\n",
-                briOrPwrChanged ? "bri/pwr " : "",
-                cctChanged      ? "cct "     : "",
-                rgbwChanged     ? "rgbw "    : "",
-                _lastSentBri, bri, _lastSentOn, curOn, LAST_CCT, curCct,
-                LAST_R, LAST_G, LAST_B, LAST_W, r, g, b, w);
-    publishState();  // coalesced sender (respects pending flags + sends CCT/white if configured)
-
-  // Power/brightness debounce cache (color/CCT snapshots are updated in publishState)
-  _lastSentOn  = curOn;
-  _lastSentBri = bri;
+    // Immediate publish for CCT/RGBW changes only
+    scheduleStatePublish();
   }
 
-  // --- Effect / Preset change detection (publish only those) ---
-  static uint8_t lastFxSent = 0xFF;
-  uint8_t fxLive = effectCurrent;                       // WLED global: current effect index (byte)
-  if (GA_OUT_FX && fxLive != lastFxSent) {
-    _pendingTxFx = true;                                // only FX pending
-    Serial.printf("[KNX-UM] GUI change -> publish (fx %u)\n", fxLive);
-    publishState();                                     // sends GA_OUT_FX only
-    lastFxSent = fxLive;
-  }
-
-  static int lastPresetSent = -1;                       // -1 sentinel; currentPreset is byte
+  // --- Preset change detection (immediate) ---
   int preLive = (int)currentPreset;                     // WLED global: 0 none, >0 active (byte)
-  if (GA_OUT_PRE && preLive != lastPresetSent) {
+  if (GA_OUT_PRE && preLive != s_lastPresetSent) {
     _lastPreset = (uint8_t)constrain(preLive, 0, 255);  // keep existing _lastPreset semantics
-    Serial.printf("[KNX-UM] GUI change -> publish (preset %d)\n", preLive);
-    publishState();                                     // publishState() gates PRE to "changed-only"
-    lastPresetSent = preLive;
+    scheduleStatePublish();  // Route through centralized system
+    s_lastPresetSent = preLive;
   }
 
-  // Optional periodic state publish (coalesced into normal TX path)
+  // Optional periodic state publish
   if (periodicEnabled) {
     uint32_t now2 = millis();
     if (now2 - _lastPeriodicMs >= periodicIntervalMs) {
       _lastPeriodicMs = now2;
-      // Schedule power + brightness + effect; colors are sent if GA_OUT_* are configured
-      scheduleStatePublish(true, true, true);
+      scheduleStatePublish();
     }
   }
 
-
+  // Execute scheduled publishes (centralized publishing)
   if (_nextTxAt && millis() >= _nextTxAt) {
     _nextTxAt = 0;
-    Serial.println("[KNX-UM] publishState() due.");
-    publishState();
+    Serial.printf("[KNX-UM] Scheduled publish triggered\n");
+    // Safety check before executing publish
+    if (KNX.running()) {
+      publishState();  // Execute the actual publish
+    } else {
+      Serial.printf("[KNX-UM] Scheduled publish skipped - KNX not running\n");
+    }
   }
 }
 
-void KnxIpUsermod::scheduleStatePublish(bool pwr, bool bri_, bool fx) {
-  _pendingTxPower |= pwr;
-  _pendingTxBri   |= bri_;
-  _pendingTxFx    |= fx;
-  unsigned long now = millis();
-  if (_nextTxAt == 0 || now > _nextTxAt) _nextTxAt = now + txRateLimitMs;
+void KnxIpUsermod::scheduleStatePublish() {
+  // Safety check: don't schedule if KNX is not running
+  if (!enabled || !KNX.running()) {
+    Serial.printf("[KNX-UM] scheduleStatePublish() skipped - KNX not running (enabled=%d, running=%d)\n", 
+                  enabled, KNX.running());
+    return;
+  }
+  
+  // Smart change detection: only set pending flags for things that actually changed
+  bool curOn = (bri > 0);
+  
+  // Get current CCT and RGBW values
+  const Segment& seg = strip.getSegment(0);
+  uint8_t curCct = seg.cct;
+  const uint32_t c = seg.colors[0];
+  uint8_t curR = R(c), curG = G(c), curB = B(c), curW = W(c);
+  uint8_t curPreset = currentPreset;
+  
+  if (g_firstCall) {
+    // Initialize on first call
+    g_lastScheduleBri = bri;
+    g_lastScheduleOn = curOn;
+    g_lastScheduleFx = effectCurrent;
+    g_lastScheduleCct = curCct;
+    g_lastScheduleR = curR;
+    g_lastScheduleG = curG;
+    g_lastScheduleB = curB;
+    g_lastScheduleW = curW;
+    g_lastSchedulePreset = curPreset;
+    g_firstCall = false;
+  }
+  
+  // Detect all changes
+  bool powerChanged = (g_lastScheduleOn != curOn);
+  bool briChanged = (g_lastScheduleBri != bri);
+  bool fxChanged = (g_lastScheduleFx != effectCurrent);
+  bool cctChanged = (g_lastScheduleCct != curCct);
+  bool rgbwChanged = (g_lastScheduleR != curR) || (g_lastScheduleG != curG) || 
+                     (g_lastScheduleB != curB) || (g_lastScheduleW != curW);
+  bool presetChanged = (g_lastSchedulePreset != curPreset);
+  
+  // Set pending flags for changes
+  if (powerChanged) {
+    _pendingTxPower = true;
+    Serial.printf("[KNX-UM] Power changed: %d→%d\n", g_lastScheduleOn, curOn);
+  }
+  if (briChanged) {
+    _pendingTxBri = true;
+    Serial.printf("[KNX-UM] Brightness changed: %d→%d\n", g_lastScheduleBri, bri);
+  }
+  if (fxChanged) {
+    _pendingTxFx = true;
+    Serial.printf("[KNX-UM] Effect changed: %d→%d\n", g_lastScheduleFx, effectCurrent);
+  }
+  if (cctChanged) {
+    // CCT changes are published immediately in publishState() via the debounce cache
+    Serial.printf("[KNX-UM] CCT changed: %d→%d\n", g_lastScheduleCct, curCct);
+  }
+  if (rgbwChanged) {
+    // RGBW changes are published immediately in publishState() via the debounce cache
+    Serial.printf("[KNX-UM] RGBW changed: (%d,%d,%d,%d)→(%d,%d,%d,%d)\n", 
+                  g_lastScheduleR, g_lastScheduleG, g_lastScheduleB, g_lastScheduleW,
+                  curR, curG, curB, curW);
+  }
+  if (presetChanged) {
+    _lastPreset = curPreset;  // Update the global preset state used by publishState()
+    Serial.printf("[KNX-UM] Preset changed: %d→%d\n", g_lastSchedulePreset, curPreset);
+  }
+  
+  // Update all last known state
+  g_lastScheduleBri = bri;
+  g_lastScheduleOn = curOn;
+  g_lastScheduleFx = effectCurrent;
+  g_lastScheduleCct = curCct;
+  g_lastScheduleR = curR;
+  g_lastScheduleG = curG;
+  g_lastScheduleB = curB;
+  g_lastScheduleW = curW;
+  g_lastSchedulePreset = curPreset;
+  
+  // Schedule if we have ANY changes (including CCT, RGBW, presets)
+  bool hasChanges = powerChanged || briChanged || fxChanged || cctChanged || rgbwChanged || presetChanged;
+  if (hasChanges) {
+    // Only schedule if no publish is already pending
+    if (_nextTxAt == 0) {
+      unsigned long now = millis();
+      _nextTxAt = now + txRateLimitMs;
+      Serial.printf("[KNX-UM] Scheduled publish in %dms (pwr=%d, bri=%d, fx=%d, cct=%d, rgbw=%d, preset=%d)\n", 
+                    txRateLimitMs, powerChanged, briChanged, fxChanged, cctChanged, rgbwChanged, presetChanged);
+    } else {
+      Serial.printf("[KNX-UM] Merge with existing schedule (pwr=%d, bri=%d, fx=%d, cct=%d, rgbw=%d, preset=%d)\n", 
+                    powerChanged, briChanged, fxChanged, cctChanged, rgbwChanged, presetChanged);
+    }
+  } else {
+    //Serial.printf("[KNX-UM] No actual changes detected - skipping schedule\n");
+  }
 }
 
 void KnxIpUsermod::addToConfig(JsonObject& root) {
@@ -1571,6 +1673,7 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   top["enabled"] = enabled;
   top["individual_address"] = individualAddr;
   top["tx_rate_limit_ms"] = txRateLimitMs;
+  top["color_out_mode"] = colorOutMode; // 0=channels,1=composites,2=both
   top["periodic_enabled"] = periodicEnabled;
   top["periodic_interval_ms"] = periodicIntervalMs;
   top["cct_kelvin_min"] = kelvinMin;
@@ -1658,6 +1761,7 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   kelvinMax = top["cct_kelvin_max"] | kelvinMax;
   periodicEnabled    = top["periodic_enabled"]     | periodicEnabled;
   periodicIntervalMs = top["periodic_interval_ms"] | periodicIntervalMs;
+  colorOutMode       = top["color_out_mode"]       | colorOutMode;
   commEnhance       = top["communication_enhancement"]    | commEnhance;
   commResends       = top["communication_resends"]        | commResends;
   commResendGapMs   = top["communication_resend_gap"]  | commResendGapMs;
@@ -1955,7 +2059,7 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
       KNX.groupValueRead(primer);
     }
     // Push state so KNX sees the new mapping
-    scheduleStatePublish(true, true, true);
+    scheduleStatePublish();
   } else {
     // Lightweight path: keep socket, just refresh IGMP and tweak runtime
     if (KNX.running()) {
@@ -2060,7 +2164,9 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   // Periodic interval units
   uiScript.print(F("addInfo(ux+':periodic_enabled',1,' [-]');"));
   uiScript.print(F("addInfo(ux+':periodic_interval_ms',1,' [ms]');"));
-
+  // Color output mode
+  uiScript.print(F("addInfo(ux+':color_out_mode',1,' [-] 0=single_values, 1=composite_only, 2=both');"));
+  // Communication enhancement
   uiScript.print(F("addInfo(ux+':communication_enhancement',1,' [-]');"));
   uiScript.print(F("addInfo(ux+':communication_resends',1,' [-]');"));
   uiScript.print(F("addInfo(ux+':communication_resend_gap',1,' [ms]');"));
