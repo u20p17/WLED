@@ -3,6 +3,15 @@
 #include "wled.h"
 #include "esp-knx-ip.h"
 
+// Debug logging control: define KNX_UM_DEBUG at build time to enable verbose logs
+#ifdef KNX_UM_DEBUG
+  #define KNX_UM_DEBUGF(...) Serial.printf(__VA_ARGS__)
+  #define KNX_UM_DEBUGLN(msg) Serial.println(msg)
+#else
+  #define KNX_UM_DEBUGF(...)
+  #define KNX_UM_DEBUGLN(msg)
+#endif
+
 #ifndef USERMOD_ID_KNX_IP
 #define USERMOD_ID_KNX_IP 0xA902
 #endif

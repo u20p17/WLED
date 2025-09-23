@@ -1308,12 +1308,12 @@ void KnxIpUsermod::setup() {
 void KnxIpUsermod::publishState() {
   // Safety check: ensure KNX is running before any operations
   if (!enabled || !KNX.running()) {
-    Serial.printf("[KNX-UM] publishState() aborted - KNX not running (enabled=%d, running=%d)\n", 
+    KNX_UM_DEBUGF("[KNX-UM] publishState() aborted - KNX not running (enabled=%d, running=%d)\n", 
                   enabled, KNX.running());
     return;
   }
   _publishSeq++;
-  Serial.printf("[KNX-UM] publishState(seq=%lu at %lums) pendingFlags: PWR=%d BRI=%d FX=%d COLOR=%d PRE=%d\n",
+  KNX_UM_DEBUGF("[KNX-UM] publishState(seq=%lu at %lums) pendingFlags: PWR=%d BRI=%d FX=%d COLOR=%d PRE=%d\n",
                 (unsigned long)_publishSeq, millis(), _pendingTxPower, _pendingTxBri, _pendingTxFx, _pendingTxColor, _pendingTxPreset);
                 
   // If nothing is pending and no OUT GAs are configured, bail early
@@ -1344,7 +1344,7 @@ void KnxIpUsermod::publishState() {
   const bool anyColorChanged = chR || chG || chB || chW || chCct || chWW || chCW;
 
   if (!anyPending && !_pendingTxColor && !_pendingTxPreset) {
-    Serial.println("[KNX-UM] publishState() early exit - nothing configured pending");
+    KNX_UM_DEBUGLN("[KNX-UM] publishState() early exit - nothing configured pending");
     return;
   }
 
@@ -1363,7 +1363,7 @@ void KnxIpUsermod::publishState() {
 
   // Colors / White / CCT / WW / CW — only if changed
   if (_pendingTxColor && anyColorOut && colorOutMode != 1) { // per-channel
-    Serial.printf("[KNX-UM] Color change flags R=%d G=%d B=%d W=%d CCT=%d WW=%d CW=%d (anyColorChanged=%d)\n", 
+    KNX_UM_DEBUGF("[KNX-UM] Color change flags R=%d G=%d B=%d W=%d CCT=%d WW=%d CW=%d (anyColorChanged=%d)\n", 
                   chR, chG, chB, chW, chCct, chWW, chCW, anyColorChanged);
     if (chR)   { uint8_t v=r;   KNX.groupValueWrite(GA_OUT_R,   &v, 1); }
     if (chG)   { uint8_t v=g;   KNX.groupValueWrite(GA_OUT_G,   &v, 1); }
@@ -1417,142 +1417,14 @@ void KnxIpUsermod::publishState() {
   _pendingTxPower = _pendingTxBri = _pendingTxFx = false;
   _pendingTxColor = false;
   _pendingTxPreset = false;
-  Serial.printf("[KNX-UM] publishState(seq=%lu) done. Snapshot R=%u G=%u B=%u W=%u CCT=%u bri=%u on=%u\n", 
+  KNX_UM_DEBUGF("[KNX-UM] publishState(seq=%lu) done. Snapshot R=%u G=%u B=%u W=%u CCT=%u bri=%u on=%u\n", 
                 (unsigned long)_publishSeq, r, g, b, w, cct, bri, (bri>0));
-}
-
-void KnxIpUsermod::loop() {
-  if (!enabled) return;
-// --- Detect LED capability (lc) change at runtime and rebuild GA mapping immediately ---
-static uint8_t       s_lastLc = 0xFF;
-static unsigned long s_lcChangedAt = 0;
-
-// OR light-capabilities across all segments (robust for multi-bus setups)
-uint8_t lcNow = 0;
-const uint16_t segCount = strip.getSegmentsNum();
-for (uint16_t i = 0; i < segCount; i++) {
-  lcNow |= strip.getSegment(i).getLightCapabilities(); // bit0=RGB, bit1=W, bit2=CCT
-}
-
-if (lcNow != s_lastLc) {
-  s_lastLc = lcNow;
-  s_lcChangedAt = millis();
-  Serial.printf("[KNX-UM] LED capabilities changed (lc=0x%02X). Pending rebuild...\n", lcNow);
-}
-
-// Debounce (avoid thrashing while user edits LED settings in the UI)
-if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
-  s_lcChangedAt = 0;
-
-  LedProfile newProf = detectLedProfileFromSegments();
-  if (newProf != g_ledProfile) {
-    Serial.printf("[KNX-UM] LED profile changed %s -> %s. Re-registering KNX GAs now.\n",
-      (g_ledProfile==LedProfile::MONO?"MONO":
-       g_ledProfile==LedProfile::CCT?"CCT":
-       g_ledProfile==LedProfile::RGB?"RGB":
-       g_ledProfile==LedProfile::RGBW?"RGBW":"RGBCCT"),
-      (newProf==LedProfile::MONO?"MONO":
-       newProf==LedProfile::CCT?"CCT":
-       newProf==LedProfile::RGB?"RGB":
-       newProf==LedProfile::RGBW?"RGBW":"RGBCCT"));
-
-    // Full rebuild: drop socket + GA registry; setup() will detect and re-register
-    KNX.end();
-    KNX.clearRegistrations();
-    g_ledProfile = newProf;   // update hint; setup() re-detects and gates GAs
-    setup();
-
-    // Optional: primer so routers/ETS learn us immediately
-    if (KNX.running()) {
-      const uint16_t primer = knxMakeGroupAddress(0,0,1);
-      KNX.groupValueRead(primer);
-    }
-  }
-}
-
-
-  // If KNX could not start in setup() due to missing IP, retry once we have one.
-  static bool knxStartedLogged = false;
-  if (!knxStartedLogged) {
-    if (Network.isConnected()) {
-      IPAddress ip = Network.localIP();
-      if (ip && ip.toString() != String("0.0.0.0")) {
-        Serial.println("[KNX-UM] Network ready (got IP). Retrying KNX.begin()...");
-        bool ok = KNX.begin();
-        Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n",
-                      ok ? "OK" : "FAILED",
-                      ip.toString().c_str());
-        if (ok) knxStartedLogged = true;
-      } else {
-        Serial.printf("[KNX-UM] Network connected, waiting for IP...\n");
-      }
-    } else {
-      Serial.printf("[KNX-UM] Network not connected yet.\n");
-    }
-  }
-
-  // Detect network IP changes and refresh IGMP membership without tearing socket down
-  static IPAddress _lastIpForKnx;
-  if (KNX.running()) {
-    IPAddress cur = Network.localIP();
-    if (cur && cur.toString() != String("0.0.0.0")) {
-      if (_lastIpForKnx != cur) {
-        Serial.printf("[KNX-UM] Network IP changed %s -> %s, refreshing KNX multicast membership...\n",
-                      _lastIpForKnx.toString().c_str(), cur.toString().c_str());
-        if (!KNX.rejoinMulticast()) {
-          // Fallback: hard restart the KNX socket if rejoin fails
-          KNX.end();
-          KNX.begin();
-        }
-        _lastIpForKnx = cur;
-      }
-    }
-  }
-
-  KNX.loop();
-
-  // GUI-driven changes now unified: we trigger scheduleStatePublish() elsewhere (handlers or periodic).
-  // Light color/effect changes occurring outside KNX handlers rely on LAST_* snapshot differences handled
-  // in scheduleStatePublish() via _pendingTxColor flag. To avoid over-chatter, we maintain a debounce window.
-  {
-    const Segment& seg0 = strip.getSegment(0);
-    uint32_t now = millis();
-    if (now - _lastUiSendMs >= _minUiSendIntervalMs) {
-      // We just mark that a potential GUI-originated change occurred by invoking the scheduler.
-      // The scheduler will compare against its last snapshot and set pending flags appropriately.
-      _lastUiSendMs = now;
-      scheduleStatePublish();
-    }
-  }
-
-  // Preset: rely solely on scheduleStatePublish() detecting preset changes; no direct send here.
-
-  // Optional periodic state publish
-  if (periodicEnabled) {
-    uint32_t now2 = millis();
-    if (now2 - _lastPeriodicMs >= periodicIntervalMs) {
-      _lastPeriodicMs = now2;
-      scheduleStatePublish();
-    }
-  }
-
-  // Execute scheduled publishes (centralized publishing)
-  if (_nextTxAt && millis() >= _nextTxAt) {
-    _nextTxAt = 0;
-    Serial.printf("[KNX-UM] Scheduled publish triggered\n");
-    // Safety check before executing publish
-    if (KNX.running()) {
-      publishState();  // Execute the actual publish
-    } else {
-      Serial.printf("[KNX-UM] Scheduled publish skipped - KNX not running\n");
-    }
-  }
 }
 
 void KnxIpUsermod::scheduleStatePublish() {
   // Safety check: don't schedule if KNX is not running
   if (!enabled || !KNX.running()) {
-    Serial.printf("[KNX-UM] scheduleStatePublish() skipped - KNX not running (enabled=%d, running=%d)\n", 
+    KNX_UM_DEBUGF("[KNX-UM] scheduleStatePublish() skipped - KNX not running (enabled=%d, running=%d)\n", 
                   enabled, KNX.running());
     return;
   }
@@ -1593,26 +1465,26 @@ void KnxIpUsermod::scheduleStatePublish() {
   // Set pending flags for changes
   if (powerChanged) {
     _pendingTxPower = true;
-    Serial.printf("[KNX-UM] Power changed: %d→%d\n", g_lastScheduleOn, curOn);
+    KNX_UM_DEBUGF("[KNX-UM] Power changed: %d→%d\n", g_lastScheduleOn, curOn);
   }
   if (briChanged) {
     _pendingTxBri = true;
-    Serial.printf("[KNX-UM] Brightness changed: %d→%d\n", g_lastScheduleBri, bri);
+    KNX_UM_DEBUGF("[KNX-UM] Brightness changed: %d→%d\n", g_lastScheduleBri, bri);
   }
   if (fxChanged) {
     _pendingTxFx = true;
-    Serial.printf("[KNX-UM] Effect changed: %d→%d\n", g_lastScheduleFx, effectCurrent);
+    KNX_UM_DEBUGF("[KNX-UM] Effect changed: %d→%d\n", g_lastScheduleFx, effectCurrent);
   }
   if (cctChanged || rgbwChanged) {
     _pendingTxColor = true;
-    Serial.printf("[KNX-UM] Color/CCT changed: R:%d→%d G:%d→%d B:%d→%d W:%d→%d CCT:%d→%d\n",
+    KNX_UM_DEBUGF("[KNX-UM] Color/CCT changed: R:%d→%d G:%d→%d B:%d→%d W:%d→%d CCT:%d→%d\n",
                   g_lastScheduleR, curR, g_lastScheduleG, curG, g_lastScheduleB, curB,
                   g_lastScheduleW, curW, g_lastScheduleCct, curCct);
   }
   if (presetChanged) {
     _lastPreset = curPreset;
     _pendingTxPreset = true;
-    Serial.printf("[KNX-UM] Preset changed: %d→%d\n", g_lastSchedulePreset, curPreset);
+    KNX_UM_DEBUGF("[KNX-UM] Preset changed: %d→%d\n", g_lastSchedulePreset, curPreset);
   }
   
   // Update all last known state
@@ -1633,14 +1505,140 @@ void KnxIpUsermod::scheduleStatePublish() {
     if (_nextTxAt == 0) {
       unsigned long now = millis();
       _nextTxAt = now + txRateLimitMs;
-      Serial.printf("[KNX-UM] Scheduled publish in %dms (pwr=%d, bri=%d, fx=%d, cct=%d, rgbw=%d, preset=%d)\n", 
+      KNX_UM_DEBUGF("[KNX-UM] Scheduled publish in %dms (pwr=%d, bri=%d, fx=%d, cct=%d, rgbw=%d, preset=%d)\n", 
                     txRateLimitMs, powerChanged, briChanged, fxChanged, cctChanged, rgbwChanged, presetChanged);
     } else {
-      Serial.printf("[KNX-UM] Merge with existing schedule (pwr=%d, bri=%d, fx=%d, cct=%d, rgbw=%d, preset=%d)\n", 
+      KNX_UM_DEBUGF("[KNX-UM] Merge with existing schedule (pwr=%d, bri=%d, fx=%d, cct=%d, rgbw=%d, preset=%d)\n", 
                     powerChanged, briChanged, fxChanged, cctChanged, rgbwChanged, presetChanged);
     }
   } else {
     //Serial.printf("[KNX-UM] No actual changes detected - skipping schedule\n");
+  }
+}
+
+void KnxIpUsermod::loop() {
+  if (!enabled) return;
+// --- Detect LED capability (lc) change at runtime and rebuild GA mapping immediately ---
+static uint8_t       s_lastLc = 0xFF;
+static unsigned long s_lcChangedAt = 0;
+
+// OR light-capabilities across all segments (robust for multi-bus setups)
+uint8_t lcNow = 0;
+const uint16_t segCount = strip.getSegmentsNum();
+for (uint16_t i = 0; i < segCount; i++) {
+  lcNow |= strip.getSegment(i).getLightCapabilities(); // bit0=RGB, bit1=W, bit2=CCT
+}
+
+if (lcNow != s_lastLc) {
+  s_lastLc = lcNow;
+  s_lcChangedAt = millis();
+  KNX_UM_DEBUGF("[KNX-UM] LED capabilities changed (lc=0x%02X). Pending rebuild...\n", lcNow);
+}
+
+// Debounce (avoid thrashing while user edits LED settings in the UI)
+if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
+  s_lcChangedAt = 0;
+
+  LedProfile newProf = detectLedProfileFromSegments();
+  if (newProf != g_ledProfile) {
+    KNX_UM_DEBUGF("[KNX-UM] LED profile changed %s -> %s. Re-registering KNX GAs now.\n",
+      (g_ledProfile==LedProfile::MONO?"MONO":
+       g_ledProfile==LedProfile::CCT?"CCT":
+       g_ledProfile==LedProfile::RGB?"RGB":
+       g_ledProfile==LedProfile::RGBW?"RGBW":"RGBCCT"),
+      (newProf==LedProfile::MONO?"MONO":
+       newProf==LedProfile::CCT?"CCT":
+       newProf==LedProfile::RGB?"RGB":
+       newProf==LedProfile::RGBW?"RGBW":"RGBCCT"));
+
+    // Full rebuild: drop socket + GA registry; setup() will detect and re-register
+    KNX.end();
+    KNX.clearRegistrations();
+    g_ledProfile = newProf;   // update hint; setup() re-detects and gates GAs
+    setup();
+
+    // Optional: primer so routers/ETS learn us immediately
+    if (KNX.running()) {
+      const uint16_t primer = knxMakeGroupAddress(0,0,1);
+      KNX.groupValueRead(primer);
+    }
+  }
+}
+
+  // If KNX could not start in setup() due to missing IP, retry once we have one.
+  static bool knxStartedLogged = false;
+  if (!knxStartedLogged) {
+    if (Network.isConnected()) {
+      IPAddress ip = Network.localIP();
+      if (ip && ip.toString() != String("0.0.0.0")) {
+        KNX_UM_DEBUGLN("[KNX-UM] Network ready (got IP). Retrying KNX.begin()...");
+        bool ok = KNX.begin();
+        KNX_UM_DEBUGF("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n",
+                      ok ? "OK" : "FAILED",
+                      ip.toString().c_str());
+        if (ok) knxStartedLogged = true;
+      } else {
+        KNX_UM_DEBUGLN("[KNX-UM] Network connected, waiting for IP...");
+      }
+    } else {
+      KNX_UM_DEBUGLN("[KNX-UM] Network not connected yet.");
+    }
+  }
+
+  // Detect network IP changes and refresh IGMP membership without tearing socket down
+  static IPAddress _lastIpForKnx;
+  if (KNX.running()) {
+    IPAddress cur = Network.localIP();
+    if (cur && cur.toString() != String("0.0.0.0")) {
+      if (_lastIpForKnx != cur) {
+        KNX_UM_DEBUGF("[KNX-UM] Network IP changed %s -> %s, refreshing KNX multicast membership...\n",
+                      _lastIpForKnx.toString().c_str(), cur.toString().c_str());
+        if (!KNX.rejoinMulticast()) {
+          // Fallback: hard restart the KNX socket if rejoin fails
+          KNX.end();
+          KNX.begin();
+        }
+        _lastIpForKnx = cur;
+      }
+    }
+  }
+
+  KNX.loop();
+
+  // GUI-driven changes now unified: we trigger scheduleStatePublish() elsewhere (handlers or periodic).
+  // Light color/effect changes occurring outside KNX handlers rely on LAST_* snapshot differences handled
+  // in scheduleStatePublish() via _pendingTxColor flag. To avoid over-chatter, we maintain a debounce window.
+  {
+    uint32_t now = millis();
+    if (now - _lastUiSendMs >= _minUiSendIntervalMs) {
+      // We just mark that a potential GUI-originated change occurred by invoking the scheduler.
+      // The scheduler will compare against its last snapshot and set pending flags appropriately.
+      _lastUiSendMs = now;
+      scheduleStatePublish();
+    }
+  }
+
+  // Preset: rely solely on scheduleStatePublish() detecting preset changes; no direct send here.
+
+  // Optional periodic state publish
+  if (periodicEnabled) {
+    uint32_t now2 = millis();
+    if (now2 - _lastPeriodicMs >= periodicIntervalMs) {
+      _lastPeriodicMs = now2;
+      scheduleStatePublish();
+    }
+  }
+
+  // Execute scheduled publishes (centralized publishing)
+  if (_nextTxAt && millis() >= _nextTxAt) {
+    _nextTxAt = 0;
+    KNX_UM_DEBUGLN("[KNX-UM] Scheduled publish triggered");
+    // Safety check before executing publish
+    if (KNX.running()) {
+      publishState();  // Execute the actual publish
+    } else {
+      KNX_UM_DEBUGLN("[KNX-UM] Scheduled publish skipped - KNX not running");
+    }
   }
 }
 
