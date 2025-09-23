@@ -12,6 +12,15 @@
   #define KNX_UM_DEBUGLN(msg)
 #endif
 
+// Warning logging (always on unless explicitly suppressed)
+#ifndef KNX_UM_SUPPRESS_WARN
+  #define KNX_UM_WARNF(...) Serial.printf(__VA_ARGS__)
+  #define KNX_UM_WARNLN(msg) Serial.println(msg)
+#else
+  #define KNX_UM_WARNF(...)
+  #define KNX_UM_WARNLN(msg)
+#endif
+
 #ifndef USERMOD_ID_KNX_IP
 #define USERMOD_ID_KNX_IP 0xA902
 #endif

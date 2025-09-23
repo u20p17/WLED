@@ -5,14 +5,23 @@ The KNX IP usermod includes an optional verbose debug logging facility to help d
 ## Overview
 Verbose logs are compiled in only when the preprocessor symbol `KNX_UM_DEBUG` is defined at build time. When disabled (default), almost all diagnostic `Serial` output from the KNX usermod is removed, minimizing flash size and runtime overhead.
 
-Logging is routed through two macros defined in `usermods/KNX_IP/usermod_knx_ip.h`:
+Logging is routed through macros defined in `usermods/KNX_IP/usermod_knx_ip.h`:
 
 ```
-KNX_UM_DEBUGF(fmt, ...)   // printf-style formatted log
-KNX_UM_DEBUGLN(msg)       // simple line message
+KNX_UM_DEBUGF(fmt, ...)    // verbose printf-style log (enabled only with KNX_UM_DEBUG)
+KNX_UM_DEBUGLN(msg)        // verbose single-line message
+KNX_UM_WARNF(fmt, ...)     // warning (always on unless KNX_UM_SUPPRESS_WARN defined)
+KNX_UM_WARNLN(msg)         // warning single-line message
 ```
 
-If `KNX_UM_DEBUG` is not defined these expand to empty no-op macros (they generate no code).
+If `KNX_UM_DEBUG` is not defined the DEBUG macros expand to no-ops and generate no code/data.
+Warnings are emitted unconditionally by default so that configuration or validation problems are visible even in production builds.
+
+To silence warnings (not generally recommended) add:
+```
+-DKNX_UM_SUPPRESS_WARN
+```
+to your `build_flags`. This converts `KNX_UM_WARN*` macros into no-ops as well.
 
 ## Enabling Debug Logs (PlatformIO)
 Add a build flag for the environment you are using (example for a custom ESP32 dev environment) in `platformio_override.ini`:
@@ -53,7 +62,7 @@ These help answer:
 - Network IP change handling and GA registration rebuild events
 
 ## Performance Impact
-With debug disabled (default) only critical warnings (e.g. invalid GA strings) still print. Enabling debug:
+With debug disabled (default) only warning lines (e.g. invalid GA / PA strings, sanity checks) still print using the WARN macros. Enabling debug:
 - Increases flash usage slightly (format strings + code)
 - Adds additional Serial I/O (can slow loop if baud is low)
 - Should not materially affect KNX timing, but for maximum performance keep it disabled in production
@@ -73,4 +82,3 @@ Avoid raw `Serial.print*` calls for verbose info unless the message must always 
 `color_out_mode` (0=per-channel only, 1=composites only, 2=both) is often tuned while observing debug output to confirm the correct telegram set is sent.
 
 ---
-For further optimization or to split warning vs verbose channels, a future enhancement could add a separate always-on `KNX_UM_WARN` macro.

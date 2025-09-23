@@ -919,12 +919,12 @@ void KnxIpUsermod::setup() {
 
   // --- Early validation of PA and GA strings (mirrors readFromConfig pre-validation) ---
   if (*individualAddr && !KnxIpUsermod::validateIndividualAddressString(individualAddr)) {
-    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' at startup -> reverting to 1.1.100\n", individualAddr);
+  KNX_UM_WARNF("[KNX-UM][WARN] Invalid individual address '%s' at startup -> reverting to 1.1.100\n", individualAddr);
     strlcpy(individualAddr, "1.1.100", sizeof(individualAddr));
   }
   auto validateOrClear = [](char* s, const char* tag){
     if (*s && !KnxIpUsermod::validateGroupAddressString(s)) {
-      Serial.printf("[KNX-UM][WARN] Invalid GA '%s' (%s) at startup -> disabled\n", s, tag);
+  KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA '%s' (%s) at startup -> disabled\n", s, tag);
       s[0] = 0;
     }
   };
@@ -990,7 +990,7 @@ void KnxIpUsermod::setup() {
     Serial.printf("[KNX-UM] PA set to %u.%u.%u (0x%04X)\n",
                   (unsigned)((pa>>12)&0x0F), (unsigned)((pa>>8)&0x0F), (unsigned)(pa&0xFF), pa);
   } else {
-    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' -> using previous/not set\n", individualAddr);
+  KNX_UM_WARNF("[KNX-UM][WARN] Invalid individual address '%s' -> using previous/not set\n", individualAddr);
    
   }
 
@@ -1007,13 +1007,13 @@ void KnxIpUsermod::setup() {
   GA_IN_B    = parseGA(gaInB);
   GA_IN_FX   = parseGA(gaInFx);
   GA_IN_PRE  = parseGA(gaInPreset);
-  if (!GA_IN_PWR   && *gaInPower)  Serial.printf("[KNX-UM][WARN] Invalid GA in power '%s'\n", gaInPower);
-  if (!GA_IN_BRI   && *gaInBri)    Serial.printf("[KNX-UM][WARN] Invalid GA in bri '%s'\n", gaInBri);
-  if (!GA_IN_R     && *gaInR)      Serial.printf("[KNX-UM][WARN] Invalid GA in r '%s'\n", gaInR);
-  if (!GA_IN_G     && *gaInG)      Serial.printf("[KNX-UM][WARN] Invalid GA in g '%s'\n", gaInG);
-  if (!GA_IN_B     && *gaInB)      Serial.printf("[KNX-UM][WARN] Invalid GA in b '%s'\n", gaInB);
-  if (!GA_IN_FX    && *gaInFx)     Serial.printf("[KNX-UM][WARN] Invalid GA in fx '%s'\n", gaInFx);
-  if (!GA_IN_PRE   && *gaInPreset) Serial.printf("[KNX-UM][WARN] Invalid GA in preset '%s'\n", gaInPreset);
+  if (!GA_IN_PWR   && *gaInPower)  KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA in power '%s'\n", gaInPower);
+  if (!GA_IN_BRI   && *gaInBri)    KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA in bri '%s'\n", gaInBri);
+  if (!GA_IN_R     && *gaInR)      KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA in r '%s'\n", gaInR);
+  if (!GA_IN_G     && *gaInG)      KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA in g '%s'\n", gaInG);
+  if (!GA_IN_B     && *gaInB)      KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA in b '%s'\n", gaInB);
+  if (!GA_IN_FX    && *gaInFx)     KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA in fx '%s'\n", gaInFx);
+  if (!GA_IN_PRE   && *gaInPreset) KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA in preset '%s'\n", gaInPreset);
   Serial.printf("[KNX-UM] IN  pwr=0x%04X bri=0x%04X R=0x%04X G=0x%04X B=0x%04X fx=0x%04X pre=0x%04X\n",
                 GA_IN_PWR, GA_IN_BRI, GA_IN_R, GA_IN_G, GA_IN_B, GA_IN_FX, GA_IN_PRE);
 
@@ -1786,13 +1786,13 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   // --- Pre-validate GA / PA strings (clear invalid to prevent repeated parse warnings) ---
   // Validate individual address (personal address / PA)
   if (*individualAddr && !KnxIpUsermod::validateIndividualAddressString(individualAddr)) {
-    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' in config -> reverting to default 1.1.100\n", individualAddr);
+  KNX_UM_WARNF("[KNX-UM][WARN] Invalid individual address '%s' in config -> reverting to default 1.1.100\n", individualAddr);
     strlcpy(individualAddr, "1.1.100", sizeof(individualAddr));
   }
 
   auto validateOrClear = [](char* s, const char* tag){
     if (*s && !KnxIpUsermod::validateGroupAddressString(s)) {
-      Serial.printf("[KNX-UM][WARN] Invalid GA '%s' (%s) -> disabled\n", s, tag);
+  KNX_UM_WARNF("[KNX-UM][WARN] Invalid GA '%s' (%s) -> disabled\n", s, tag);
       s[0] = 0; // disable
     }
   };
@@ -2014,7 +2014,7 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
     Serial.printf("[KNX-UM] PA set to %u.%u.%u (0x%04X)\n",
                   (unsigned)((pa>>12)&0x0F), (unsigned)((pa>>8)&0x0F), (unsigned)(pa&0xFF), pa);
   } else {
-    Serial.printf("[KNX-UM][WARN] Invalid individual address '%s' (unchanged)\n", individualAddr);
+  KNX_UM_WARNF("[KNX-UM][WARN] Invalid individual address '%s' (unchanged)\n", individualAddr);
   }
 
   // ---- rebuild vs. tweak ----
