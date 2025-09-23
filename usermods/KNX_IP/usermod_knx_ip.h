@@ -124,6 +124,8 @@ private:
   // --- TX coalescing flags/timer ---
   unsigned long _nextTxAt = 0;
   bool _pendingTxPower = false, _pendingTxBri = false, _pendingTxFx = false;
+  bool _pendingTxColor = false;     // any RGBW/CCT change pending
+  bool _pendingTxPreset = false;    // preset index change pending
   uint32_t _lastPeriodicMs = 0;   // last time we scheduled a periodic publish
   // Diagnostics: count how many times publishState() actually runs
   uint32_t _publishSeq = 0;

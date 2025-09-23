@@ -1313,9 +1313,8 @@ void KnxIpUsermod::publishState() {
     return;
   }
   _publishSeq++;
-  unsigned long nowMs = millis();
-  Serial.printf("[KNX-UM] publishState(seq=%lu at %lums) pending: pwr=%d bri=%d fx=%d\n", 
-                (unsigned long)_publishSeq, nowMs, _pendingTxPower, _pendingTxBri, _pendingTxFx);
+  Serial.printf("[KNX-UM] publishState(seq=%lu at %lums) pendingFlags: PWR=%d BRI=%d FX=%d COLOR=%d PRE=%d\n",
+                (unsigned long)_publishSeq, millis(), _pendingTxPower, _pendingTxBri, _pendingTxFx, _pendingTxColor, _pendingTxPreset);
                 
   // If nothing is pending and no OUT GAs are configured, bail early
   const bool anyPending  = _pendingTxPower || _pendingTxBri || _pendingTxFx;
@@ -1344,13 +1343,9 @@ void KnxIpUsermod::publishState() {
 
   const bool anyColorChanged = chR || chG || chB || chW || chCct || chWW || chCW;
 
-  if (!anyPending && !anyColorOut && !GA_OUT_PRE) {
+  if (!anyPending && !_pendingTxColor && !_pendingTxPreset) {
     Serial.println("[KNX-UM] publishState() early exit - nothing configured pending");
     return;
-  }
-  if (!anyPending && !anyColorChanged && !GA_OUT_PRE) {
-    Serial.println("[KNX-UM] publishState() early exit - no changes detected");
-    return; // nothing to send
   }
 
   // Base state
@@ -1359,15 +1354,15 @@ void KnxIpUsermod::publishState() {
   const uint8_t fxIndex = effectCurrent;                           // 0..255
 
   // Pending (coalesced) telegrams
-  if (_pendingTxPower && GA_OUT_PWR) KNX.write1Bit(GA_OUT_PWR, pwr);   // DPT 1.001
+  if (_pendingTxPower && GA_OUT_PWR) KNX.write1Bit(GA_OUT_PWR, pwr);    // DPT 1.001
   if (_pendingTxBri   && GA_OUT_BRI) KNX.writeScaling(GA_OUT_BRI, pct); // DPT 5.001
   if (_pendingTxFx    && GA_OUT_FX)  {
-    uint8_t v = fxIndex;                                              // DPT 5.xxx raw
+    uint8_t v = fxIndex;                                                // DPT 5.xxx raw
     KNX.groupValueWrite(GA_OUT_FX, &v, 1);
   }
 
   // Colors / White / CCT / WW / CW — only if changed
-  if (anyColorOut && colorOutMode != 1) { // skip individual channels if composite-only mode
+  if (_pendingTxColor && anyColorOut && colorOutMode != 1) { // per-channel
     Serial.printf("[KNX-UM] Color change flags R=%d G=%d B=%d W=%d CCT=%d WW=%d CW=%d (anyColorChanged=%d)\n", 
                   chR, chG, chB, chW, chCct, chWW, chCW, anyColorChanged);
     if (chR)   { uint8_t v=r;   KNX.groupValueWrite(GA_OUT_R,   &v, 1); }
@@ -1383,7 +1378,7 @@ void KnxIpUsermod::publishState() {
     if (chCW)  { uint8_t v=cw;  KNX.groupValueWrite(GA_OUT_CW,  &v, 1); }
   }
 
-  if (anyColorChanged && colorOutMode != 0) { // skip composites if per-channel-only mode
+  if (_pendingTxColor && anyColorChanged && colorOutMode != 0) { // composites
     // Snapshot again (already have r,g,b,w,cct)
     // 1) RGB (DPST-232-600) 3 bytes
     if (GA_OUT_RGB) {
@@ -1407,13 +1402,9 @@ void KnxIpUsermod::publishState() {
     if (GA_OUT_V) { uint8_t vb = pct01ToByte(v01);  KNX.groupValueWrite(GA_OUT_V, &vb, 1); }
   }
 
-// Preset index (if configured) – send only if it actually changed
-  if (GA_OUT_PRE) {
-    if (s_lastPresetSent != _lastPreset) {
-      uint8_t p = _lastPreset; // last applied via onKnxPreset()
-      KNX.groupValueWrite(GA_OUT_PRE, &p, 1);
-      s_lastPresetSent = _lastPreset;
-    }
+  if (_pendingTxPreset && GA_OUT_PRE) {
+    KNX.groupValueWrite(GA_OUT_PRE, &_lastPreset, 1);
+    s_lastPresetSent = _lastPreset;
   }
 
   // Publish temperature only if it actually changed
@@ -1424,6 +1415,8 @@ void KnxIpUsermod::publishState() {
 
   // Clear pending flags after publish
   _pendingTxPower = _pendingTxBri = _pendingTxFx = false;
+  _pendingTxColor = false;
+  _pendingTxPreset = false;
   Serial.printf("[KNX-UM] publishState(seq=%lu) done. Snapshot R=%u G=%u B=%u W=%u CCT=%u bri=%u on=%u\n", 
                 (unsigned long)_publishSeq, r, g, b, w, cct, bri, (bri>0));
 }
@@ -1518,35 +1511,21 @@ if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
 
   KNX.loop();
 
-  // Detect state changes for immediate GUI-driven changes (CCT/RGBW/Presets only)
-  const Segment& seg = strip.getSegment(0);
-  uint8_t curCct = seg.cct; // 0..255 (0=warm .. 255=cold)
-  const uint32_t c = seg.colors[0];
-  uint8_t r = R(c), g = G(c), b = B(c), w = W(c);
-
-  bool cctChanged      = (curCct != LAST_CCT);
-  bool rgbwChanged     = (r != LAST_R) || (g != LAST_G) || (b != LAST_B) || (w != LAST_W);
-
-  uint32_t now = millis();
-
-  // Optional extra throttle during effects to avoid chatter
-  uint16_t minInterval = _minUiSendIntervalMs;
-  if (effectCurrent != 0) minInterval = 1000;  // be gentler while an effect runs
-
-  // Handle immediate GUI-driven changes that can't wait for scheduled publish
-  if ((cctChanged || rgbwChanged) && (now - _lastUiSendMs >= minInterval)) {
-    _lastUiSendMs = now;
-    // Immediate publish for CCT/RGBW changes only
-    scheduleStatePublish();
+  // GUI-driven changes now unified: we trigger scheduleStatePublish() elsewhere (handlers or periodic).
+  // Light color/effect changes occurring outside KNX handlers rely on LAST_* snapshot differences handled
+  // in scheduleStatePublish() via _pendingTxColor flag. To avoid over-chatter, we maintain a debounce window.
+  {
+    const Segment& seg0 = strip.getSegment(0);
+    uint32_t now = millis();
+    if (now - _lastUiSendMs >= _minUiSendIntervalMs) {
+      // We just mark that a potential GUI-originated change occurred by invoking the scheduler.
+      // The scheduler will compare against its last snapshot and set pending flags appropriately.
+      _lastUiSendMs = now;
+      scheduleStatePublish();
+    }
   }
 
-  // --- Preset change detection (immediate) ---
-  int preLive = (int)currentPreset;                     // WLED global: 0 none, >0 active (byte)
-  if (GA_OUT_PRE && preLive != s_lastPresetSent) {
-    _lastPreset = (uint8_t)constrain(preLive, 0, 255);  // keep existing _lastPreset semantics
-    scheduleStatePublish();  // Route through centralized system
-    s_lastPresetSent = preLive;
-  }
+  // Preset: rely solely on scheduleStatePublish() detecting preset changes; no direct send here.
 
   // Optional periodic state publish
   if (periodicEnabled) {
@@ -1624,18 +1603,15 @@ void KnxIpUsermod::scheduleStatePublish() {
     _pendingTxFx = true;
     Serial.printf("[KNX-UM] Effect changed: %d→%d\n", g_lastScheduleFx, effectCurrent);
   }
-  if (cctChanged) {
-    // CCT changes are published immediately in publishState() via the debounce cache
-    Serial.printf("[KNX-UM] CCT changed: %d→%d\n", g_lastScheduleCct, curCct);
-  }
-  if (rgbwChanged) {
-    // RGBW changes are published immediately in publishState() via the debounce cache
-    Serial.printf("[KNX-UM] RGBW changed: (%d,%d,%d,%d)→(%d,%d,%d,%d)\n", 
-                  g_lastScheduleR, g_lastScheduleG, g_lastScheduleB, g_lastScheduleW,
-                  curR, curG, curB, curW);
+  if (cctChanged || rgbwChanged) {
+    _pendingTxColor = true;
+    Serial.printf("[KNX-UM] Color/CCT changed: R:%d→%d G:%d→%d B:%d→%d W:%d→%d CCT:%d→%d\n",
+                  g_lastScheduleR, curR, g_lastScheduleG, curG, g_lastScheduleB, curB,
+                  g_lastScheduleW, curW, g_lastScheduleCct, curCct);
   }
   if (presetChanged) {
-    _lastPreset = curPreset;  // Update the global preset state used by publishState()
+    _lastPreset = curPreset;
+    _pendingTxPreset = true;
     Serial.printf("[KNX-UM] Preset changed: %d→%d\n", g_lastSchedulePreset, curPreset);
   }
   
@@ -1651,7 +1627,7 @@ void KnxIpUsermod::scheduleStatePublish() {
   g_lastSchedulePreset = curPreset;
   
   // Schedule if we have ANY changes (including CCT, RGBW, presets)
-  bool hasChanges = powerChanged || briChanged || fxChanged || cctChanged || rgbwChanged || presetChanged;
+  bool hasChanges = powerChanged || briChanged || fxChanged || _pendingTxColor || _pendingTxPreset;
   if (hasChanges) {
     // Only schedule if no publish is already pending
     if (_nextTxAt == 0) {
