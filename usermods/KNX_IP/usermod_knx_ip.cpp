@@ -315,6 +315,7 @@ void KnxIpUsermod::onKnxColorRel(uint8_t channel, uint8_t dpt3) {
 void KnxIpUsermod::onKnxWhiteRel(uint8_t dpt3){ onKnxColorRel(3,dpt3); }
 
 void KnxIpUsermod::onKnxWWRel(uint8_t dpt3) { adjustWhiteSplitRel(knx_step_delta(dpt3 & 0x0F, 255), true); }
+
 void KnxIpUsermod::onKnxCWRel(uint8_t dpt3) { adjustWhiteSplitRel(knx_step_delta(dpt3 & 0x0F, 255), false); }
 
 void KnxIpUsermod::onKnxHueRel(uint8_t dpt3) {
@@ -1290,9 +1291,22 @@ void KnxIpUsermod::setup() {
   } else {
     WiFi.setSleep(false);     // modem-sleep off helps WiFi multicast reliability
     Serial.println("[KNX-UM] Using WiFi connection, sleep disabled");
+    
+    // Additional lwIP readiness check - wait for TCP/IP stack to be fully initialized
+    // The crash occurs because lwIP's TCP/IP mailbox isn't ready even though we have an IP
+    delay(100);  // Give lwIP time to complete initialization
+    
+    // Verify WiFi is still connected after delay
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[KNX-UM] WiFi disconnected during lwIP wait, deferring KNX.begin().");
+      return;
+    }
   }
 #endif
 
+  // Additional safety: ensure we're not in a critical network transition
+  yield();
+  
   bool ok = KNX.begin();
   Serial.printf("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n", ok ? "OK" : "FAILED", ip.toString().c_str());
   
@@ -1572,6 +1586,19 @@ if (s_lcChangedAt && (millis() - s_lcChangedAt >= 300)) {
       IPAddress ip = Network.localIP();
       if (ip && ip.toString() != String("0.0.0.0")) {
         KNX_UM_DEBUGLN("[KNX-UM] Network ready (got IP). Retrying KNX.begin()...");
+        
+        // Same lwIP safety as in setup() - prevent "Invalid mbox" crash
+        #ifdef ARDUINO_ARCH_ESP32
+        if (!Network.isEthernet()) {
+          delay(100);  // Give lwIP time to stabilize
+          if (WiFi.status() != WL_CONNECTED) {
+            KNX_UM_DEBUGLN("[KNX-UM] WiFi disconnected during retry wait.");
+            return;
+          }
+        }
+        #endif
+        yield();
+        
         bool ok = KNX.begin();
         KNX_UM_DEBUGF("[KNX-UM] KNX.begin() -> %s (localIP=%s)\n",
                       ok ? "OK" : "FAILED",
