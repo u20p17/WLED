@@ -189,6 +189,12 @@ void KnxIpUsermod::onKnxRGB(uint8_t r, uint8_t g, uint8_t b) {
   Serial.printf("[KNX-UM] onKnxRGB: R=%d G=%d B=%d -> setting R=%d G=%d B=%d W=%d\n", r, g, b, r, g, b, cw);
   Serial.printf("[KNX-UM] onKnxRGB: Current WLED state: bri=%d, on=%d\n", bri, (bri > 0));
   
+  // Auto-enable feature: if brightness is 0 and color changes, set brightness automatically
+  if (autoEnableOnColor && bri == 0 && (r > 0 || g > 0 || b > 0)) {
+    Serial.printf("[KNX-UM] Auto-enable: Color changed while brightness=0, setting brightness to %d\n", autoEnableBrightness);
+    bri = autoEnableBrightness;
+  }
+  
   // Set the color on the segment
   uint32_t newColor = RGBW32(r, g, b, cw);
   strip.getMainSegment().setColor(0, newColor);
@@ -1292,8 +1298,6 @@ void KnxIpUsermod::setup() {
     WiFi.setSleep(false);     // modem-sleep off helps WiFi multicast reliability
     Serial.println("[KNX-UM] Using WiFi connection, sleep disabled");
     
-    // Additional lwIP readiness check - wait for TCP/IP stack to be fully initialized
-    // The crash occurs because lwIP's TCP/IP mailbox isn't ready even though we have an IP
     delay(100);  // Give lwIP time to complete initialization
     
     // Verify WiFi is still connected after delay
@@ -1686,6 +1690,8 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   top["Internal Temperature Alarm"]   = intTempAlarmMaxC;
   top["Temperature Sensor Alarm"]     = dallasTempAlarmMaxC;
   top["Temperature Alarm Hysteresis"] = tempAlarmHystC;
+  top["auto_enable_on_color"]     = autoEnableOnColor;
+  top["auto_enable_brightness"]   = autoEnableBrightness;
 
 
   JsonObject gIn  = top.createNestedObject("GA in");
@@ -1767,6 +1773,9 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   commResends       = top["communication_resends"]        | commResends;
   commResendGapMs   = top["communication_resend_gap"]  | commResendGapMs;
   commRxDedupMs     = top["communication_rx_dedup"]    | commRxDedupMs;
+  autoEnableOnColor     = top["auto_enable_on_color"]     | autoEnableOnColor;
+  autoEnableBrightness  = top["auto_enable_brightness"]   | autoEnableBrightness;
+  if (autoEnableBrightness > 255) autoEnableBrightness = 255;
 
 
   // accept either "GA in"/"GA out" (what we save) or "in"/"out"

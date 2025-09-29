@@ -123,6 +123,10 @@ public:
   uint16_t commResendGapMs    = 0;      // gap between repeats
   uint16_t commRxDedupMs      = 700;    // duplicate window
 
+  // Auto-brightness when color changes while brightness=0
+  bool     autoEnableOnColor     = true;    // Enable auto-brightness feature
+  uint8_t  autoEnableBrightness  = 128;     // Brightness to set (0-255)
+
 
   // --- Usermod API ---
   void setup();
