@@ -1505,17 +1505,6 @@ void KnxIpUsermod::scheduleStatePublish() {
     KNX_UM_DEBUGF("[KNX-UM] Preset changed: %d→%d\n", g_lastSchedulePreset, curPreset);
   }
   
-  // Update all last known state
-  g_lastScheduleBri = bri;
-  g_lastScheduleOn = curOn;
-  g_lastScheduleFx = effectCurrent;
-  g_lastScheduleCct = curCct;
-  g_lastScheduleR = curR;
-  g_lastScheduleG = curG;
-  g_lastScheduleB = curB;
-  g_lastScheduleW = curW;
-  g_lastSchedulePreset = curPreset;
-  
   // Schedule if we have ANY changes (including CCT, RGBW, presets)
   bool hasChanges = powerChanged || briChanged || fxChanged || _pendingTxColor || _pendingTxPreset;
   if (hasChanges) {
@@ -1529,6 +1518,18 @@ void KnxIpUsermod::scheduleStatePublish() {
       KNX_UM_DEBUGF("[KNX-UM] Merge with existing schedule (pwr=%d, bri=%d, fx=%d, cct=%d, rgbw=%d, preset=%d)\n", 
                     powerChanged, briChanged, fxChanged, cctChanged, rgbwChanged, presetChanged);
     }
+    
+    // IMPORTANT: Only update last known state AFTER scheduling, not before
+    // This ensures repeated calls can still detect the same change until it's actually published
+    g_lastScheduleBri = bri;
+    g_lastScheduleOn = curOn;
+    g_lastScheduleFx = effectCurrent;
+    g_lastScheduleCct = curCct;
+    g_lastScheduleR = curR;
+    g_lastScheduleG = curG;
+    g_lastScheduleB = curB;
+    g_lastScheduleW = curW;
+    g_lastSchedulePreset = curPreset;
   } else {
     //Serial.printf("[KNX-UM] No actual changes detected - skipping schedule\n");
   }
