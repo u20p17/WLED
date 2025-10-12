@@ -32,6 +32,13 @@ public:
   // --- Config values (editable via JSON/UI) ---
   bool  enabled = true;
   char  individualAddr[16] = "1.1.100";
+  // --- GA Table cache ---
+  mutable String gaTableCache;
+  mutable uint32_t gaTableCacheHash = 0;
+  mutable uint8_t gaTableCacheSegments = 0;
+  void invalidateGATableCache() { gaTableCacheHash = 0; }
+  // Helper to compute a hash of all GA strings and segment offsets
+  uint32_t computeGATableHash() const;
 
   // Inbound GAs (commands from KNX -> WLED)
   char  gaInPower[16]   = "1/0/1";   // DPT 1.001 (switch)

@@ -1,3 +1,24 @@
+// Helper: simple hash for config strings and segment offsets
+uint32_t KnxIpUsermod::computeGATableHash() const {
+  // FNV-1a hash
+  uint32_t hash = 2166136261u;
+  auto hashstr = [&](const char* s) {
+    while (*s) { hash ^= (uint8_t)(*s++); hash *= 16777619u; }
+  };
+  // Hash all GA strings
+  const char* gaStrings[] = {
+    gaInPower, gaInBri, gaInR, gaInG, gaInB, gaInW, gaInCct, gaInWW, gaInCW, gaInH, gaInS, gaInV, gaInFx, gaInPreset, gaInRGB, gaInHSV, gaInRGBW, gaInTime, gaInDate, gaInDateTime,
+    gaInBriRel, gaInRRel, gaInGRel, gaInBRel, gaInWRel, gaInWWRel, gaInCWRel, gaInHRel, gaInSRel, gaInVRel, gaInFxRel, gaInRGBRel, gaInHSVRel, gaInRGBWRel,
+    gaOutPower, gaOutBri, gaOutR, gaOutG, gaOutB, gaOutW, gaOutCct, gaOutWW, gaOutCW, gaOutH, gaOutS, gaOutV, gaOutFx, gaOutPreset, gaOutRGB, gaOutHSV, gaOutRGBW,
+    gaOutIntTemp, gaOutTemp, gaOutIntTempAlarm, gaOutTempAlarm
+  };
+  for (const char* s : gaStrings) hashstr(s);
+  // Hash segment offsets
+  hash ^= segmentOffsetL; hash *= 16777619u;
+  hash ^= segmentOffsetM; hash *= 16777619u;
+  hash ^= segmentOffsetN; hash *= 16777619u;
+  return hash;
+}
 #include "usermod_knx_ip.h"
 #include "wled.h"   // access to global 'strip' and segments
 #include "DPT.h"
@@ -1662,79 +1683,59 @@ String KnxIpUsermod::getGATableHTML() const {
     KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: usermod not enabled\n");
     return "";
   }
-  
-  // Get current number of segments
   uint8_t segmentCount = strip.getSegmentsNum();
-  if (segmentCount == 0) segmentCount = 1; // at least main segment
-  
-  KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: generating table for %d segments\n", segmentCount);
-  
-  // Create table with better styling
+  if (segmentCount == 0) segmentCount = 1;
+  uint32_t hash = computeGATableHash();
+  if (gaTableCacheHash == hash && gaTableCacheSegments == segmentCount && gaTableCache.length() > 0) {
+    KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: using cached table (%d chars)\n", gaTableCache.length());
+    return gaTableCache;
+  }
+  KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: rebuilding table for %d segments\n", segmentCount);
+  // ...existing code...
+  // (copy the entire original function body here, but assign to gaTableCache and update gaTableCacheHash/gaTableCacheSegments)
   String html = "<table style='font-size:11px;border-collapse:collapse;width:100%;'>";
   html += "<tr style='background:#333;color:white;'><th style='border:1px solid #666;padding:4px;'>GA Type</th><th style='border:1px solid #666;padding:4px;'>Main</th>";
-  for (uint8_t seg = 1; seg < segmentCount && seg < 6; seg++) { // limit to 6 segments for display
+  for (uint8_t seg = 1; seg < segmentCount && seg < 6; seg++) {
     html += "<th style='border:1px solid #666;padding:4px;'>Seg" + String(seg) + "</th>";
   }
   html += "</tr>";
-  
-  // Helper to format GA (convert uint16_t back to a/b/c format)
   auto formatGA = [](uint16_t ga) -> String {
     if (ga == 0) return "-";
-    uint8_t main = (ga >> 11) & 0x1F;   
-    uint8_t middle = (ga >> 8) & 0x07;   
-    uint8_t sub = ga & 0xFF;            
+    uint8_t main = (ga >> 11) & 0x1F;
+    uint8_t middle = (ga >> 8) & 0x07;
+    uint8_t sub = ga & 0xFF;
     return String(main) + "/" + String(middle) + "/" + String(sub);
   };
-  
-  // Collect all GAs used across the entire table for global conflict detection
   std::vector<uint16_t> allUsedGAs;
-  
-  // Helper to add table row with conflict detection
   auto addRow = [&](const char* label, const char* centralGA, const char* section = "", bool globalOnly = false) {
-    if (strlen(centralGA) == 0) return; // skip if GA not configured
-    
+    if (strlen(centralGA) == 0) return;
     html += "<tr><td style='border:1px solid #666;padding:2px 4px;color:white;'>" + String(label) + "</td>";
-    
     if (globalOnly) {
-      // For global GAs (Time, Date, Temperature), show only once in main column
       uint16_t mainGA = parseGA(centralGA);
       bool mainConflict = (mainGA > 0) && (std::find(allUsedGAs.begin(), allUsedGAs.end(), mainGA) != allUsedGAs.end());
       if (mainGA > 0) allUsedGAs.push_back(mainGA);
-      
       String mainBg = mainConflict ? "background:#cc3333;" : "";
       html += "<td style='border:1px solid #666;padding:2px 4px;color:white;" + mainBg + "'>" + formatGA(mainGA) + "</td>";
-      
-      // Empty cells for other segments
       for (uint8_t seg = 1; seg < segmentCount && seg < 6; seg++) {
         html += "<td style='border:1px solid #666;padding:2px 4px;color:white;'>-</td>";
       }
     } else {
-      // For per-segment GAs, calculate for each segment
-      // Main segment (segment 0)
       uint16_t mainGA = calculateSegmentGA(centralGA, 0);
       bool mainConflict = (mainGA > 0) && (std::find(allUsedGAs.begin(), allUsedGAs.end(), mainGA) != allUsedGAs.end());
       if (mainGA > 0) allUsedGAs.push_back(mainGA);
-      
       String mainBg = mainConflict ? "background:#cc3333;" : "";
       html += "<td style='border:1px solid #666;padding:2px 4px;color:white;" + mainBg + "'>" + formatGA(mainGA) + "</td>";
-      
-      // Other segments
       for (uint8_t seg = 1; seg < segmentCount && seg < 6; seg++) {
         uint16_t segGA = calculateSegmentGA(centralGA, seg);
         bool segConflict = (segGA > 0) && (std::find(allUsedGAs.begin(), allUsedGAs.end(), segGA) != allUsedGAs.end());
         if (segGA > 0) allUsedGAs.push_back(segGA);
-        
         String segBg = segConflict ? "background:#cc3333;" : "";
         html += "<td style='border:1px solid #666;padding:2px 4px;color:white;" + segBg + "'>" + formatGA(segGA) + "</td>";
       }
     }
     html += "</tr>";
   };
-  
-  // Add INPUT GAs section
   html += "<tr><td colspan='" + String(1 + min((int)segmentCount, 6)) + "' style='border:1px solid #666;padding:4px;text-align:center;color:white;font-weight:bold;'>INPUT GAs (KNX → WLED)</td></tr>";
-  
-  // Basic INPUT GAs
   addRow("Power", gaInPower);
   addRow("Brightness", gaInBri);
   addRow("Red", gaInR);
@@ -1755,8 +1756,6 @@ String KnxIpUsermod::getGATableHTML() const {
   addRow("Time", gaInTime, "", true);
   addRow("Date", gaInDate, "", true);
   addRow("DateTime", gaInDateTime, "", true);
-  
-  // Relative INPUT GAs
   addRow("Brightness Rel", gaInBriRel);
   addRow("Red Rel", gaInRRel);
   addRow("Green Rel", gaInGRel);
@@ -1771,11 +1770,7 @@ String KnxIpUsermod::getGATableHTML() const {
   addRow("RGB Rel", gaInRGBRel);
   addRow("HSV Rel", gaInHSVRel);
   addRow("RGBW Rel", gaInRGBWRel);
-  
-  // Add OUTPUT GAs section
   html += "<tr><td colspan='" + String(1 + min((int)segmentCount, 6)) + "' style='border:1px solid #666;padding:4px;text-align:center;color:white;font-weight:bold;'>OUTPUT GAs (WLED → KNX)</td></tr>";
-  
-  // Basic OUTPUT GAs
   addRow("Power", gaOutPower);
   addRow("Brightness", gaOutBri);
   addRow("Red", gaOutR);
@@ -1797,15 +1792,13 @@ String KnxIpUsermod::getGATableHTML() const {
   addRow("Temp Sensor", gaOutTemp, "", true);
   addRow("Int Temp Alarm", gaOutIntTempAlarm, "", true);
   addRow("Temp Alarm", gaOutTempAlarm, "", true);
-  
   html += "</table>";
-  
-  // Add offset information
   html += "<div style='font-size:10px;margin-top:4px;color:#aaa;'>Offsets: L=" + String(segmentOffsetL) + ", M=" + String(segmentOffsetM) + ", N=" + String(segmentOffsetN) + "</div>";
-  
+  gaTableCache = html;
+  gaTableCacheHash = hash;
+  gaTableCacheSegments = segmentCount;
   KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: generated %d chars\n", html.length());
-  
-  return html;
+  return gaTableCache;
 }
 
 // -------------------- Usermod API --------------------
