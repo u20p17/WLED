@@ -850,6 +850,7 @@ WLED_GLOBAL bool doCloseFile _INIT(false);
 WLED_GLOBAL byte currentPreset _INIT(0);
 
 WLED_GLOBAL byte errorFlag _INIT(0);
+WLED_GLOBAL char errorDetails[256] _INIT({0}); // Additional error details for specific errors
 
 WLED_GLOBAL String messageHead, messageSub;
 WLED_GLOBAL byte optionType;

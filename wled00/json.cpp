@@ -577,7 +577,20 @@ void serializeState(JsonObject root, bool forPreset, bool includeBri, bool segme
   }
 
   if (!forPreset) {
-    if (errorFlag) {root[F("error")] = errorFlag; errorFlag = ERR_NONE;} //prevent error message to persist on screen
+    if (errorFlag) {
+      root[F("error")] = errorFlag; 
+      
+      // Add error details if available
+      if (errorDetails[0] != '\0') {
+        root[F("error_msg")] = errorDetails;
+        #ifdef WLED_DEBUG
+          Serial.printf("[JSON] Adding error details: '%s'\n", errorDetails);
+        #endif
+        errorDetails[0] = '\0'; // Clear error details after sending
+      }
+      
+      errorFlag = ERR_NONE; //prevent error message to persist on screen
+    }
 
     root["ps"] = (currentPreset > 0) ? currentPreset : -1;
     root[F("pl")] = currentPlaylist;

@@ -78,6 +78,20 @@ KNX_UM_DEBUGLN("[KNX-UM] Simple message");
 ```
 Avoid raw `Serial.print*` calls for verbose info unless the message must always appear.
 
+## Testing Integration
+
+Debug output is particularly useful when running the test suites located in `/test/`:
+- Enable debug output with `-DKNX_UM_DEBUG`
+- Run tests from `/test/GA_CONFLICT_TESTS.md` to validate GA conflict detection
+- Use integration tests from `/test/README_TESTING.md` for end-to-end validation
+
+Example test output with debug enabled:
+```
+[KNX-TEST] Starting GA Conflict Detection Tests
+[KNX-UM] GA conflict detected: 1/2/10 used by both central and segment 0
+[KNX-TEST] ✓ Conflicts detected with zero offsets
+```
+
 ## Related Settings
 `color_out_mode` (0=per-channel only, 1=composites only, 2=both) is often tuned while observing debug output to confirm the correct telegram set is sent.
 

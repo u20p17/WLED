@@ -16,16 +16,16 @@ bool KnxIpCore::unpack1Bit(const uint8_t* p, uint8_t len) {
 
 // ===== DPT 5.001 (Scaling 0..100%) =====
 uint8_t KnxIpCore::packScaling(uint8_t pct) {
-  // For safety clamp to 0..100; KNX 5.001 usually expects 0..100 domain.
   if (pct > 100) pct = 100;
-  return pct;
+  // 0..100% → 0..255 with rounding
+  return (uint8_t)(((uint16_t)pct * 255u + 50u) / 100u);
 }
 
 uint8_t KnxIpCore::unpackScaling(const uint8_t* p, uint8_t len) {
   if (!p || len < 1) return 0;
-  uint8_t v = p[0];
-  if (v > 100) v = 100;
-  return v;
+  uint8_t raw = p[0]; // 0..255
+  // 0..255 → 0..100% with rounding
+  return (uint8_t)(((uint16_t)raw * 100u + 127u) / 255u);
 }
 
 // DPT 9.xxx (2-byte float, EIS5) implementation

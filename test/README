@@ -1,11 +1,45 @@
 
-This directory is intended for PIO Unit Testing and project tests.
+# WLED Test Directory
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+This directory contains PIO Unit Testing resources and comprehensive test suites for WLED usermods.
+
+## 🧪 General Testing Framework
+
+Unit Testing is a software testing method by which individual units of source code, sets of one or more MCU program modules together with associated control data, usage procedures, and operating procedures, are tested to determine whether they are fit for use. Unit testing finds problems early in the development cycle.
 
 More information about PIO Unit Testing:
 - https://docs.platformio.org/page/plus/unit-testing.html
+
+## 🏗️ KNX IP Usermod Tests
+
+This directory contains comprehensive test suites for the KNX IP usermod:
+
+### 📋 Test Documentation
+- **`README_TESTING.md`** - Complete KNX testing guide and instructions
+- **`GA_CONFLICT_TESTS.md`** - GA conflict detection test documentation
+
+### 🧩 Test Implementation Files
+- **`test_segment_knx.cpp`** - Standalone segment functionality tests
+- **`test_ga_conflicts.cpp`** - GA conflict detection test suite
+- **`knx_segment_tests.h`** - Integration test framework
+- **`knx_unit_tests.cpp`** - Lightweight unit tests for CI/CD
+- **`knx_pure_test.cpp`** - Original KNX test suite
+- **`knx_pure_test_usermod.cpp`** - Usermod-specific KNX tests
+
+### 🚀 Quick Start
+1. **Read** `README_TESTING.md` for comprehensive testing instructions
+2. **Enable** test flags in `platformio.ini`: `-DKNX_SEGMENT_UNIT_TESTS -DKNX_UM_DEBUG`
+3. **Run** tests via serial command or automated in setup()
+
+### 🎯 Test Coverage
+- ✅ Per-segment KNX functionality
+- ✅ GA conflict detection and prevention
+- ✅ Address calculation algorithms
+- ✅ Memory management and cleanup
+- ✅ Integration with WLED segments
+- ✅ KNX bus communication validation
+
+## 🔧 Other Test Files
+- **`test_esp32_main.cpp`** - Main ESP32 test entry point
+- **`test_knx_ip_basic.cpp`** - Basic KNX IP functionality tests
+- **`unity_config.h`** - Unity test framework configuration

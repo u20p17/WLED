@@ -123,6 +123,665 @@ bool KnxIpUsermod::validateIndividualAddressString(const char* s) {
   return parsePA(s) != 0;
 }
 
+// Calculate per-segment GA from central GA + segment offset
+uint16_t KnxIpUsermod::calculateSegmentGA(const char* centralGA, uint8_t segmentIndex) const {
+  if (!centralGA || !*centralGA) return 0;
+  
+  uint16_t centralParsed = parseGA(centralGA);
+  if (centralParsed == 0) return 0;
+  
+  // Extract central address components
+  uint8_t centralMain = (centralParsed >> 11) & 0x1F;   // bits 15-11
+  uint8_t centralMiddle = (centralParsed >> 8) & 0x07;  // bits 10-8
+  uint8_t centralSub = centralParsed & 0xFF;            // bits 7-0
+  
+  // Calculate segment address: Segment N = (main + L*N, middle + M*N, sub + N*N)
+  uint16_t newMain = centralMain + (segmentOffsetL * segmentIndex);
+  uint16_t newMiddle = centralMiddle + (segmentOffsetM * segmentIndex);
+  uint16_t newSub = centralSub + (segmentOffsetN * segmentIndex);
+  
+  // Validate KNX limits
+  if (newMain > 31 || newMiddle > 7 || newSub > 255) {
+    KNX_UM_WARNF("[KNX-UM][WARN] Segment %d GA would exceed limits: %d/%d/%d (from %s + %d/%d/%d)\n",
+                 segmentIndex, newMain, newMiddle, newSub, centralGA, segmentOffsetL, segmentOffsetM, segmentOffsetN);
+    return 0;
+  }
+  
+  return knxMakeGroupAddress((uint8_t)newMain, (uint8_t)newMiddle, (uint8_t)newSub);
+}
+
+std::vector<uint16_t> KnxIpUsermod::getAllUsedGAs() const {
+  std::vector<uint16_t> usedGAs;
+  
+  // Helper to add GA if valid
+  auto addGA = [&usedGAs](const char* gaStr) {
+    if (gaStr && *gaStr) {
+      uint16_t ga = parseGA(gaStr);
+      if (ga > 0) usedGAs.push_back(ga);
+    }
+  };
+  
+  // Essential central input GAs
+  addGA(gaInPower); addGA(gaInBri); addGA(gaInFx);
+  addGA(gaInR); addGA(gaInG); addGA(gaInB); addGA(gaInW);
+  addGA(gaInPreset); addGA(gaInRGB); addGA(gaInHSV); addGA(gaInRGBW);
+  
+  // Essential central output GAs  
+  addGA(gaOutPower); addGA(gaOutBri); addGA(gaOutFx);
+  addGA(gaOutR); addGA(gaOutG); addGA(gaOutB); addGA(gaOutW);
+  addGA(gaOutPreset); addGA(gaOutRGB); addGA(gaOutHSV); addGA(gaOutRGBW);
+  
+  // Currently registered segment GAs
+  if (GA_SEG_IN_PWR) {
+    for (uint8_t i = 0; i < numSegments; i++) {
+      if (GA_SEG_IN_PWR[i] > 0) usedGAs.push_back(GA_SEG_IN_PWR[i]);
+    }
+  }
+  if (GA_SEG_IN_BRI) {
+    for (uint8_t i = 0; i < numSegments; i++) {
+      if (GA_SEG_IN_BRI[i] > 0) usedGAs.push_back(GA_SEG_IN_BRI[i]);
+    }
+  }
+  if (GA_SEG_IN_FX) {
+    for (uint8_t i = 0; i < numSegments; i++) {
+      if (GA_SEG_IN_FX[i] > 0) usedGAs.push_back(GA_SEG_IN_FX[i]);
+    }
+  }
+  if (GA_SEG_OUT_PWR) {
+    for (uint8_t i = 0; i < numSegments; i++) {
+      if (GA_SEG_OUT_PWR[i] > 0) usedGAs.push_back(GA_SEG_OUT_PWR[i]);
+    }
+  }
+  if (GA_SEG_OUT_BRI) {
+    for (uint8_t i = 0; i < numSegments; i++) {
+      if (GA_SEG_OUT_BRI[i] > 0) usedGAs.push_back(GA_SEG_OUT_BRI[i]);
+    }
+  }
+  if (GA_SEG_OUT_FX) {
+    for (uint8_t i = 0; i < numSegments; i++) {
+      if (GA_SEG_OUT_FX[i] > 0) usedGAs.push_back(GA_SEG_OUT_FX[i]);
+    }
+  }
+  
+  return usedGAs;
+}
+
+bool KnxIpUsermod::isGAInUse(uint16_t ga) const {
+  if (ga == 0) return false;
+  
+  auto usedGAs = getAllUsedGAs();
+  return std::find(usedGAs.begin(), usedGAs.end(), ga) != usedGAs.end();
+}
+
+bool KnxIpUsermod::hasGAConflicts(uint8_t maxSegments) const {
+  if (maxSegments == 0) {
+    maxSegments = strip.getSegmentsNum();
+    if (maxSegments > 32) maxSegments = 32;
+  }
+  
+  // Clear previous conflict details
+  extern char errorDetails[256];
+  errorDetails[0] = '\0';
+  
+  // Special case: single segment with zero offsets is valid (segment 0 = central)
+  if (maxSegments == 1 && segmentOffsetL == 0 && segmentOffsetM == 0 && segmentOffsetN == 0) {
+    KNX_UM_DEBUGF("[KNX-UM] Single segment with zero offsets - no conflicts (segment 0 = central)\n");
+    return false;
+  }
+  
+  std::vector<uint16_t> allGAs = getAllUsedGAs();
+  std::vector<uint16_t> potentialSegmentGAs;
+  std::vector<uint16_t> centralGAs_parsed;
+  std::vector<std::string> conflictList;  // Store conflicts for error message
+  
+  // Parse central GAs for comparison
+  const char* centralGAs[] = {gaInPower, gaInBri, gaInFx, gaOutPower, gaOutBri, gaOutFx};
+  const int numCentralGAs = sizeof(centralGAs) / sizeof(centralGAs[0]);
+  
+  for (int i = 0; i < numCentralGAs; i++) {
+    uint16_t centralGA = parseGA(centralGAs[i]);
+    if (centralGA > 0) {
+      centralGAs_parsed.push_back(centralGA);
+    }
+  }
+  
+  // Generate all potential segment GAs
+  for (uint8_t seg = 0; seg < maxSegments; seg++) {
+    for (int i = 0; i < numCentralGAs; i++) {
+      uint16_t segmentGA = calculateSegmentGA(centralGAs[i], seg);
+      if (segmentGA > 0) {
+        potentialSegmentGAs.push_back(segmentGA);
+        
+        // For segment 0, check if it matches central GA (which is expected and valid)
+        if (seg == 0) {
+          uint16_t centralGA = parseGA(centralGAs[i]);
+          if (segmentGA == centralGA) {
+            // This is expected for segment 0 - not a conflict
+            continue;
+          }
+        }
+      }
+    }
+  }
+  
+  bool hasConflicts = false;
+  
+  // Check for conflicts between existing GAs and potential segment GAs
+  // (excluding the valid segment 0 = central GA case)
+  for (uint16_t segGA : potentialSegmentGAs) {
+    if (std::find(allGAs.begin(), allGAs.end(), segGA) != allGAs.end()) {
+      // Check if this is a valid segment 0 = central GA case
+      bool isValidSegment0Match = false;
+      if (std::find(centralGAs_parsed.begin(), centralGAs_parsed.end(), segGA) != centralGAs_parsed.end()) {
+        // This segment GA matches a central GA - check if it's from segment 0
+        for (int i = 0; i < numCentralGAs; i++) {
+          uint16_t seg0GA = calculateSegmentGA(centralGAs[i], 0);
+          if (seg0GA == segGA) {
+            isValidSegment0Match = true;
+            break;
+          }
+        }
+      }
+      
+      if (!isValidSegment0Match) {
+        KNX_UM_WARNF("[KNX-UM][CONFLICT] Segment GA %d/%d/%d (0x%04X) conflicts with existing GA\n",
+                     (segGA >> 11) & 0x1F, (segGA >> 8) & 0x07, segGA & 0xFF, segGA);
+        
+        // Add to conflict list for error message
+        char conflictStr[32];
+        snprintf(conflictStr, sizeof(conflictStr), "%d/%d/%d", 
+                (segGA >> 11) & 0x1F, (segGA >> 8) & 0x07, segGA & 0xFF);
+        conflictList.push_back(std::string(conflictStr));
+        hasConflicts = true;
+      }
+    }
+  }
+  
+  // Check for conflicts within segment GAs themselves (duplicates)
+  std::sort(potentialSegmentGAs.begin(), potentialSegmentGAs.end());
+  for (size_t i = 1; i < potentialSegmentGAs.size(); i++) {
+    if (potentialSegmentGAs[i] == potentialSegmentGAs[i-1]) {
+      uint16_t conflictGA = potentialSegmentGAs[i];
+      KNX_UM_WARNF("[KNX-UM][CONFLICT] Duplicate segment GA %d/%d/%d (0x%04X)\n",
+                   (conflictGA >> 11) & 0x1F, (conflictGA >> 8) & 0x07, conflictGA & 0xFF, conflictGA);
+      
+      // Add to conflict list for error message
+      char conflictStr[32];
+      snprintf(conflictStr, sizeof(conflictStr), "%d/%d/%d", 
+              (conflictGA >> 11) & 0x1F, (conflictGA >> 8) & 0x07, conflictGA & 0xFF);
+      
+      // Avoid duplicates in conflict list
+      bool alreadyListed = false;
+      for (const auto& existing : conflictList) {
+        if (existing == conflictStr) {
+          alreadyListed = true;
+          break;
+        }
+      }
+      if (!alreadyListed) {
+        conflictList.push_back(std::string(conflictStr));
+      }
+      hasConflicts = true;
+    }
+  }
+  
+  // Build error message with conflict details
+  if (hasConflicts) {
+    const size_t errorDetailsSize = 256; // Match the size defined in wled.h
+    int pos = snprintf(errorDetails, errorDetailsSize, 
+                      "KNX GA conflicts: ");
+    
+    for (size_t i = 0; i < conflictList.size() && pos < (int)errorDetailsSize - 20; i++) {
+      if (i > 0) {
+        pos += snprintf(errorDetails + pos, errorDetailsSize - pos, ", ");
+      }
+      pos += snprintf(errorDetails + pos, errorDetailsSize - pos, 
+                     "%s", conflictList[i].c_str());
+    }
+    
+    // Add suggestion to error message
+    if (pos < (int)errorDetailsSize - 50) {
+      snprintf(errorDetails + pos, errorDetailsSize - pos, 
+               ". Check segment offsets.");
+    }
+    
+    // Debug: show what we put in the error details
+    KNX_UM_DEBUGF("[KNX-UM] Error details set: '%s'\n", errorDetails);
+  }
+  
+  return hasConflicts;
+}
+
+bool KnxIpUsermod::validateSegmentGAs() const {
+  KNX_UM_DEBUGF("[KNX-UM] Validating segment GAs for conflicts...\n");
+  
+  uint8_t segmentCount = strip.getSegmentsNum();
+  if (segmentCount > 32) segmentCount = 32;
+  
+  if (segmentCount == 0) {
+    KNX_UM_DEBUGF("[KNX-UM] No segments to validate\n");
+    return true;
+  }
+  
+  // Check for conflicts
+  bool hasConflicts = hasGAConflicts(segmentCount);
+  
+  if (hasConflicts) {
+    KNX_UM_WARNF("[KNX-UM][WARN] GA conflicts detected! Segment registration may fail or cause unexpected behavior.\n");
+    KNX_UM_WARNF("[KNX-UM][WARN] Consider adjusting segment offsets or central GAs to avoid conflicts.\n");
+    
+    // Set WLED GUI error flag to notify user
+    extern byte errorFlag;
+    errorFlag = 33; // ERR_KNX_GA_CONFLICT
+    
+    return false;
+  }
+  
+  KNX_UM_DEBUGF("[KNX-UM] Segment GA validation passed - no conflicts detected\n");
+  return true;
+}
+
+void KnxIpUsermod::analyzeGAConflicts() const {
+  KNX_UM_DEBUGF("[KNX-UM] ==========================================\n");
+  KNX_UM_DEBUGF("[KNX-UM] GA Conflict Analysis\n");
+  KNX_UM_DEBUGF("[KNX-UM] ==========================================\n");
+  
+  uint8_t segmentCount = strip.getSegmentsNum();
+  if (segmentCount > 32) segmentCount = 32;
+  
+  KNX_UM_DEBUGF("[KNX-UM] Current configuration:\n");
+  KNX_UM_DEBUGF("[KNX-UM] - Segments: %d\n", segmentCount);
+  KNX_UM_DEBUGF("[KNX-UM] - Offsets: L=%d, M=%d, N=%d\n", segmentOffsetL, segmentOffsetM, segmentOffsetN);
+  
+  // Special case: single segment with zero offsets
+  if (segmentCount == 1 && segmentOffsetL == 0 && segmentOffsetM == 0 && segmentOffsetN == 0) {
+    KNX_UM_DEBUGF("[KNX-UM] ✓ Single segment configuration: Segment 0 uses central GAs (VALID)\n");
+    KNX_UM_DEBUGF("[KNX-UM] ==========================================\n");
+    return;
+  }
+  
+  // Show central GAs
+  KNX_UM_DEBUGF("[KNX-UM] Central GAs:\n");
+  KNX_UM_DEBUGF("[KNX-UM] - Power IN: %s, OUT: %s\n", gaInPower, gaOutPower);
+  KNX_UM_DEBUGF("[KNX-UM] - Brightness IN: %s, OUT: %s\n", gaInBri, gaOutBri);
+  KNX_UM_DEBUGF("[KNX-UM] - Effect IN: %s, OUT: %s\n", gaInFx, gaOutFx);
+  
+  // Show calculated segment GAs and conflicts
+  KNX_UM_DEBUGF("[KNX-UM] Calculated segment GAs:\n");
+  std::vector<uint16_t> allUsed = getAllUsedGAs();
+  std::vector<uint16_t> centralGAs_parsed;
+  
+  // Parse central GAs for comparison
+  const char* centralGAs[] = {gaInPower, gaInBri, gaInFx, gaOutPower, gaOutBri, gaOutFx};
+  const int numCentralGAs = sizeof(centralGAs) / sizeof(centralGAs[0]);
+  
+  for (int i = 0; i < numCentralGAs; i++) {
+    uint16_t centralGA = parseGA(centralGAs[i]);
+    if (centralGA > 0) {
+      centralGAs_parsed.push_back(centralGA);
+    }
+  }
+  
+  for (uint8_t seg = 0; seg < std::min((uint8_t)segmentCount, (uint8_t)5); seg++) {  // Show first 5 segments
+    uint16_t powerIn = calculateSegmentGA(gaInPower, seg);
+    uint16_t powerOut = calculateSegmentGA(gaOutPower, seg);
+    uint16_t briIn = calculateSegmentGA(gaInBri, seg);
+    uint16_t briOut = calculateSegmentGA(gaOutBri, seg);
+    uint16_t fxIn = calculateSegmentGA(gaInFx, seg);
+    uint16_t fxOut = calculateSegmentGA(gaOutFx, seg);
+    
+    KNX_UM_DEBUGF("[KNX-UM] Segment %d:\n", seg);
+    
+    auto checkConflict = [&](uint16_t ga, const char* type) {
+      if (ga > 0) {
+        uint8_t main = (ga >> 11) & 0x1F;
+        uint8_t middle = (ga >> 8) & 0x07;
+        uint8_t sub = ga & 0xFF;
+        
+        bool conflict = false;
+        bool isValidSegment0Match = false;
+        
+        // Check if this GA is already in use
+        if (std::find(allUsed.begin(), allUsed.end(), ga) != allUsed.end()) {
+          // For segment 0, check if matching central GA is valid
+          if (seg == 0 && std::find(centralGAs_parsed.begin(), centralGAs_parsed.end(), ga) != centralGAs_parsed.end()) {
+            isValidSegment0Match = true;
+          } else {
+            conflict = true;
+          }
+        }
+        
+        if (isValidSegment0Match) {
+          KNX_UM_DEBUGF("[KNX-UM]   %s: %d/%d/%d ✓ (matches central)\n", type, main, middle, sub);
+        } else if (conflict) {
+          KNX_UM_DEBUGF("[KNX-UM]   %s: %d/%d/%d ⚠ CONFLICT\n", type, main, middle, sub);
+        } else {
+          KNX_UM_DEBUGF("[KNX-UM]   %s: %d/%d/%d ✓\n", type, main, middle, sub);
+        }
+      } else {
+        KNX_UM_DEBUGF("[KNX-UM]   %s: INVALID (exceeds limits)\n", type);
+      }
+    };
+    
+    checkConflict(powerIn, "Power IN ");
+    checkConflict(powerOut, "Power OUT");
+    checkConflict(briIn, "Bri IN   ");
+    checkConflict(briOut, "Bri OUT  ");
+    checkConflict(fxIn, "FX IN    ");
+    checkConflict(fxOut, "FX OUT   ");
+  }
+  
+  if (segmentCount > 5) {
+    KNX_UM_DEBUGF("[KNX-UM] ... (%d more segments)\n", segmentCount - 5);
+  }
+  
+  // Provide suggestions
+  KNX_UM_DEBUGF("[KNX-UM] ==========================================\n");
+  KNX_UM_DEBUGF("[KNX-UM] Suggestions to avoid conflicts:\n");
+  KNX_UM_DEBUGF("[KNX-UM] 1. Increase segment offset values (L/M/N)\n");
+  KNX_UM_DEBUGF("[KNX-UM] 2. Use different central GA ranges\n");
+  KNX_UM_DEBUGF("[KNX-UM] 3. Reduce number of segments\n");
+  KNX_UM_DEBUGF("[KNX-UM] 4. Use reserved GA ranges for segments\n");
+  KNX_UM_DEBUGF("[KNX-UM] ==========================================\n");
+}
+
+/**
+ * Test the GA conflict detection system
+ */
+void KnxIpUsermod::testGAConflictDetection() {
+    KNX_UM_DEBUGF("[KNX-TEST] Testing GA conflict detection system...\n");
+    
+    // Save original configuration
+    uint8_t origL = segmentOffsetL;
+    uint8_t origM = segmentOffsetM;
+    uint8_t origN = segmentOffsetN;
+    char origPowerIn[16], origBriIn[16], origFxIn[16];
+    strlcpy(origPowerIn, gaInPower, sizeof(origPowerIn));
+    strlcpy(origBriIn, gaInBri, sizeof(origBriIn));
+    strlcpy(origFxIn, gaInFx, sizeof(origFxIn));
+    
+    // Test 1: Valid configuration (no conflicts)
+    KNX_UM_DEBUGF("[KNX-TEST] Test 1: Valid configuration\n");
+    segmentOffsetL = 10; // Large offset to avoid conflicts
+    segmentOffsetM = 0;
+    segmentOffsetN = 50;
+    strlcpy(gaInPower, "1/1/1", sizeof(gaInPower));
+    strlcpy(gaInBri, "1/1/10", sizeof(gaInBri));
+    strlcpy(gaInFx, "1/1/20", sizeof(gaInFx));
+    
+    if (!hasGAConflicts(3)) {
+        KNX_UM_DEBUGF("[KNX-TEST] ✓ No conflicts detected with valid offsets\n");
+    } else {
+        KNX_UM_DEBUGF("[KNX-TEST] ✗ Unexpected conflicts with valid offsets\n");
+    }
+    
+    // Test 2: Conflicting configuration (segment 0 = central)
+    KNX_UM_DEBUGF("[KNX-TEST] Test 2: Zero offsets (segment 0 = central)\n");
+    segmentOffsetL = 0;
+    segmentOffsetM = 0;
+    segmentOffsetN = 0;
+    
+    if (hasGAConflicts(2)) {
+        KNX_UM_DEBUGF("[KNX-TEST] ✓ Conflicts detected with zero offsets\n");
+    } else {
+        KNX_UM_DEBUGF("[KNX-TEST] ✗ Should have detected conflicts with zero offsets\n");
+    }
+    
+    // Test 3: Cross-segment conflicts
+    KNX_UM_DEBUGF("[KNX-TEST] Test 3: Cross-segment conflicts\n");
+    segmentOffsetL = 1;
+    segmentOffsetM = 0;
+    segmentOffsetN = 0;
+    strlcpy(gaInPower, "1/2/10", sizeof(gaInPower));
+    strlcpy(gaInBri, "2/2/10", sizeof(gaInBri)); // Segment 1 power will be 2/2/10 (conflicts with central brightness)
+    
+    if (hasGAConflicts(2)) {
+        KNX_UM_DEBUGF("[KNX-TEST] ✓ Cross-segment conflicts detected\n");
+    } else {
+        KNX_UM_DEBUGF("[KNX-TEST] ✗ Should have detected cross-segment conflicts\n");
+    }
+    
+    // Test 4: Individual GA usage check
+    KNX_UM_DEBUGF("[KNX-TEST] Test 4: Individual GA usage check\n");
+    uint16_t testGA = parseGA("1/2/10");
+    if (isGAInUse(testGA)) {
+        KNX_UM_DEBUGF("[KNX-TEST] ✓ GA 1/2/10 correctly detected as in use\n");
+    } else {
+        KNX_UM_DEBUGF("[KNX-TEST] ✗ GA 1/2/10 should be detected as in use\n");
+    }
+    
+    uint16_t unusedGA = parseGA("7/7/7");
+    if (!isGAInUse(unusedGA)) {
+        KNX_UM_DEBUGF("[KNX-TEST] ✓ GA 7/7/7 correctly detected as unused\n");
+    } else {
+        KNX_UM_DEBUGF("[KNX-TEST] ✗ GA 7/7/7 should be detected as unused\n");
+    }
+    
+    // Show detailed analysis
+    KNX_UM_DEBUGF("[KNX-TEST] Detailed conflict analysis:\n");
+    analyzeGAConflicts();
+    
+    // Restore original configuration
+    segmentOffsetL = origL;
+    segmentOffsetM = origM;
+    segmentOffsetN = origN;
+    strlcpy(gaInPower, origPowerIn, sizeof(gaInPower));
+    strlcpy(gaInBri, origBriIn, sizeof(gaInBri));
+    strlcpy(gaInFx, origFxIn, sizeof(gaInFx));
+    
+    KNX_UM_DEBUGF("[KNX-TEST] GA conflict detection test completed\n");
+}
+
+/**
+ * Test validation integration with registration
+ */
+void KnxIpUsermod::testValidationIntegration() {
+    KNX_UM_DEBUGF("[KNX-TEST] Testing validation integration...\n");
+    
+    // Save current state
+    uint8_t origSegments = numSegments;
+    uint16_t* origPWR = GA_SEG_IN_PWR;
+    uint16_t* origBRI = GA_SEG_IN_BRI;
+    uint16_t* origFX = GA_SEG_IN_FX;
+    uint8_t origL = segmentOffsetL;
+    
+    // Clear arrays to test clean state
+    GA_SEG_IN_PWR = nullptr;
+    GA_SEG_IN_BRI = nullptr;
+    GA_SEG_IN_FX = nullptr;
+    numSegments = 0;
+    
+    // Test 1: Registration should fail with conflicts
+    KNX_UM_DEBUGF("[KNX-TEST] Test 1: Registration with conflicts\n");
+    segmentOffsetL = 0; // Zero offset will cause conflicts
+    
+    // Clear any existing registrations first
+    clearSegmentKOs();
+    
+    // Try to register - should fail due to conflicts
+    registerSegmentKOs();
+    
+    if (GA_SEG_IN_PWR == nullptr && numSegments == 0) {
+        KNX_UM_DEBUGF("[KNX-TEST] ✓ Registration correctly failed due to conflicts\n");
+    } else {
+        KNX_UM_DEBUGF("[KNX-TEST] ✗ Registration should have failed\n");
+    }
+    
+    // Test 2: Registration should succeed without conflicts
+    KNX_UM_DEBUGF("[KNX-TEST] Test 2: Registration without conflicts\n");
+    segmentOffsetL = 10; // Large offset to avoid conflicts
+    
+    registerSegmentKOs();
+    
+    if (strip.getSegmentsNum() > 0) {
+        if (GA_SEG_IN_PWR != nullptr && numSegments > 0) {
+            KNX_UM_DEBUGF("[KNX-TEST] ✓ Registration succeeded without conflicts\n");
+        } else {
+            KNX_UM_DEBUGF("[KNX-TEST] ✗ Registration should have succeeded\n");
+        }
+    } else {
+        KNX_UM_DEBUGF("[KNX-TEST] - No segments available for registration test\n");
+    }
+    
+    // Clean up
+    clearSegmentKOs();
+    
+    // Restore original state
+    numSegments = origSegments;
+    GA_SEG_IN_PWR = origPWR;
+    GA_SEG_IN_BRI = origBRI;
+    GA_SEG_IN_FX = origFX;
+    segmentOffsetL = origL;
+    
+    KNX_UM_DEBUGF("[KNX-TEST] Validation integration test completed\n");
+}
+
+/**
+ * Check for GA conflicts and set GUI error message if found
+ * This can be called periodically or when configuration changes
+ */
+void KnxIpUsermod::checkGAConflictsAndNotifyGUI() {
+  if (hasGAConflicts()) {
+    // Set WLED GUI error flag
+    extern byte errorFlag;
+    errorFlag = 33; // ERR_KNX_GA_CONFLICT
+    
+    KNX_UM_WARNF("[KNX-UM] GA conflicts detected - check WLED GUI for notification\n");
+    
+    // Log detailed conflict information for debugging
+    #ifdef KNX_UM_DEBUG
+    analyzeGAConflicts();
+    #endif
+  } else {
+    // Clear error flag if no conflicts (only if it was our error)
+    extern byte errorFlag;
+    if (errorFlag == 33) {
+      errorFlag = 0; // ERR_NONE
+    }
+  }
+}
+
+/**
+ * Run all GA conflict tests - can be called from setup() or externally
+ */
+void KnxIpUsermod::runGAConflictTests() {
+    KNX_UM_DEBUGF("[KNX-TEST] ==========================================\n");
+    KNX_UM_DEBUGF("[KNX-TEST] Starting GA Conflict Detection Tests\n");
+    KNX_UM_DEBUGF("[KNX-TEST] ==========================================\n");
+    
+    testGAConflictDetection();
+    testValidationIntegration();
+    
+    KNX_UM_DEBUGF("[KNX-TEST] ==========================================\n");
+    KNX_UM_DEBUGF("[KNX-TEST] GA Conflict Detection Tests Completed\n");
+    KNX_UM_DEBUGF("[KNX-TEST] ==========================================\n");
+}
+
+void KnxIpUsermod::clearSegmentKOs() {
+  // Free existing arrays (only the main controls)
+  delete[] GA_SEG_IN_PWR; GA_SEG_IN_PWR = nullptr;
+  delete[] GA_SEG_IN_BRI; GA_SEG_IN_BRI = nullptr;
+  delete[] GA_SEG_IN_FX; GA_SEG_IN_FX = nullptr;
+  
+  delete[] GA_SEG_OUT_PWR; GA_SEG_OUT_PWR = nullptr;
+  delete[] GA_SEG_OUT_BRI; GA_SEG_OUT_BRI = nullptr;
+  delete[] GA_SEG_OUT_FX; GA_SEG_OUT_FX = nullptr;
+  
+  numSegments = 0;
+}
+
+void KnxIpUsermod::registerSegmentKOs() {
+  clearSegmentKOs();
+  
+  numSegments = strip.getSegmentsNum();
+  if (numSegments > 32) {  // Reasonable limit to prevent memory issues
+    numSegments = 32;
+    KNX_UM_WARNF("[KNX-UM][WARN] Too many segments (%d), limiting to 32\n", strip.getSegmentsNum());
+  }
+  
+  if (numSegments == 0) {
+    KNX_UM_DEBUGF("[KNX-UM] No segments found, skipping per-segment KO registration\n");
+    return;
+  }
+  
+  // Validate GAs for conflicts before registration
+  if (!validateSegmentGAs()) {
+    KNX_UM_WARNF("[KNX-UM][ERROR] GA conflicts detected! Skipping segment KO registration to prevent issues.\n");
+    KNX_UM_WARNF("[KNX-UM][ERROR] Please adjust segment offsets (L=%d, M=%d, N=%d) or central GAs.\n", 
+                 segmentOffsetL, segmentOffsetM, segmentOffsetN);
+    
+    // Ensure GUI error flag is set (validateSegmentGAs already sets it, but make sure)
+    extern byte errorFlag;
+    if (errorFlag == 0) errorFlag = 33; // ERR_KNX_GA_CONFLICT
+    
+    return;
+  }
+  
+  KNX_UM_DEBUGF("[KNX-UM] Registering per-segment KOs for %d segments\n", numSegments);
+  
+  // Allocate arrays for segments (only the main controls)
+  GA_SEG_IN_PWR = new uint16_t[numSegments]();
+  GA_SEG_IN_BRI = new uint16_t[numSegments]();
+  GA_SEG_IN_FX = new uint16_t[numSegments]();
+  
+  GA_SEG_OUT_PWR = new uint16_t[numSegments]();
+  GA_SEG_OUT_BRI = new uint16_t[numSegments]();
+  GA_SEG_OUT_FX = new uint16_t[numSegments]();
+  
+  // For each segment, calculate GAs and register handlers
+  for (uint8_t seg = 0; seg < numSegments; seg++) {
+    // Calculate segment GAs using central GAs as templates
+    GA_SEG_IN_PWR[seg] = calculateSegmentGA(gaInPower, seg);
+    GA_SEG_IN_BRI[seg] = calculateSegmentGA(gaInBri, seg);
+    GA_SEG_IN_FX[seg] = calculateSegmentGA(gaInFx, seg);
+    
+    GA_SEG_OUT_PWR[seg] = calculateSegmentGA(gaOutPower, seg);
+    GA_SEG_OUT_BRI[seg] = calculateSegmentGA(gaOutBri, seg);
+    GA_SEG_OUT_FX[seg] = calculateSegmentGA(gaOutFx, seg);
+    
+    // Register input handlers for this segment using existing patterns
+    if (GA_SEG_IN_PWR[seg]) {
+      KNX.addGroupObject(GA_SEG_IN_PWR[seg], DptMain::DPT_1xx, false, true);
+      KNX.onGroup(GA_SEG_IN_PWR[seg], [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+        if (svc == KnxService::GroupValue_Write && p && len >= 1) {
+          this->onKnxSegmentPower(seg, p[0] & 1);
+        }
+      });
+    }
+    
+    if (GA_SEG_IN_BRI[seg]) {
+      KNX.addGroupObject(GA_SEG_IN_BRI[seg], DptMain::DPT_5xx, false, true);
+      KNX.onGroup(GA_SEG_IN_BRI[seg], [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+        if (svc == KnxService::GroupValue_Write && p && len >= 1) {
+          this->onKnxSegmentBrightness(seg, p[0]);
+        }
+      });
+    }
+    
+    if (GA_SEG_IN_FX[seg]) {
+      KNX.addGroupObject(GA_SEG_IN_FX[seg], DptMain::DPT_5xx, false, true);
+      KNX.onGroup(GA_SEG_IN_FX[seg], [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+        if (svc == KnxService::GroupValue_Write && p && len >= 1) {
+          this->onKnxSegmentEffect(seg, p[0]);
+        }
+      });
+    }
+    
+    // Register output objects (for status publishing)
+    if (GA_SEG_OUT_PWR[seg]) {
+      KNX.addGroupObject(GA_SEG_OUT_PWR[seg], DptMain::DPT_1xx, true, false);
+    }
+    if (GA_SEG_OUT_BRI[seg]) {
+      KNX.addGroupObject(GA_SEG_OUT_BRI[seg], DptMain::DPT_5xx, true, false);
+    }
+    if (GA_SEG_OUT_FX[seg]) {
+      KNX.addGroupObject(GA_SEG_OUT_FX[seg], DptMain::DPT_5xx, true, false);
+    }
+  }
+  
+  KNX_UM_DEBUGF("[KNX-UM] Per-segment KO registration complete\n");
+}
+
 // ---- Small helper registration shims to reduce lambda repetition ----
 // Registers a 1-byte inbound object (if ga!=0) and wires a simple callback taking the first byte.
 static void register1ByteHandler(uint16_t ga, DptMain dpt, std::function<void(uint8_t)> cb) {
@@ -534,6 +1193,55 @@ void KnxIpUsermod::onKnxV(float v01) {
   applyHSV(ch, cs, v01, true);
 }
 
+// Per-segment KO handlers
+void KnxIpUsermod::onKnxSegmentPower(uint8_t segmentIndex, bool on) {
+  if (segmentIndex >= strip.getSegmentsNum()) return;
+  
+  Segment& segment = strip.getSegment(segmentIndex);
+  segment.on = on;
+  
+  KNX_UM_DEBUGF("[KNX-UM] Segment %d power: %s\n", segmentIndex, on ? "ON" : "OFF");
+  stateUpdated(CALL_MODE_DIRECT_CHANGE);
+  // Note: Don't call scheduleStatePublish() to avoid feedback loops
+}
+
+void KnxIpUsermod::onKnxSegmentBrightness(uint8_t segmentIndex, uint8_t pct) {
+  if (segmentIndex >= strip.getSegmentsNum()) return;
+  
+  pct = clamp100(pct);
+  uint8_t bri255 = pct_to_0_255(pct);
+  
+  Segment& segment = strip.getSegment(segmentIndex);
+  segment.opacity = bri255;
+  if (bri255 > 0) segment.on = true;
+  
+  KNX_UM_DEBUGF("[KNX-UM] Segment %d brightness: %d%% (%d/255)\n", segmentIndex, pct, bri255);
+  stateUpdated(CALL_MODE_DIRECT_CHANGE);
+}
+
+void KnxIpUsermod::onKnxSegmentRGB(uint8_t segmentIndex, uint8_t r, uint8_t g, uint8_t b) {
+  if (segmentIndex >= strip.getSegmentsNum()) return;
+  
+  Segment& segment = strip.getSegment(segmentIndex);
+  uint32_t currentCol = segment.colors[0];
+  uint8_t w = W(currentCol); // Preserve white component
+  
+  segment.setColor(0, RGBW32(r, g, b, w));
+  
+  KNX_UM_DEBUGF("[KNX-UM] Segment %d RGB: R=%d G=%d B=%d\n", segmentIndex, r, g, b);
+  stateUpdated(CALL_MODE_DIRECT_CHANGE);
+}
+
+void KnxIpUsermod::onKnxSegmentEffect(uint8_t segmentIndex, uint8_t fxIndex) {
+  if (segmentIndex >= strip.getSegmentsNum()) return;
+  
+  Segment& segment = strip.getSegment(segmentIndex);
+  segment.mode = fxIndex;
+  
+  KNX_UM_DEBUGF("[KNX-UM] Segment %d effect: %d\n", segmentIndex, fxIndex);
+  stateUpdated(CALL_MODE_DIRECT_CHANGE);
+}
+
 bool KnxIpUsermod::readEspInternalTempC(float& outC) const {
 #if defined(ESP8266) || defined(CONFIG_IDF_TARGET_ESP32S2)
   Serial.printf("ESP-int: not supported on this chip\n");
@@ -920,6 +1628,160 @@ void KnxIpUsermod::onKnxDateTime_19_001(const uint8_t* p, uint8_t len) {
                 rb.tm_hour, rb.tm_min, rb.tm_sec, (int)summerTime, flags);
 }
 
+/**
+ * Generate HTML table showing all GA mappings for main group and segments
+ */
+String KnxIpUsermod::getGATableHTML() const {
+  if (!enabled) {
+    KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: usermod not enabled\n");
+    return "";
+  }
+  
+  // Get current number of segments
+  uint8_t segmentCount = strip.getSegmentsNum();
+  if (segmentCount == 0) segmentCount = 1; // at least main segment
+  
+  KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: generating table for %d segments\n", segmentCount);
+  
+  // Create table with better styling
+  String html = "<table style='font-size:11px;border-collapse:collapse;width:100%;'>";
+  html += "<tr style='background:#333;color:white;'><th style='border:1px solid #666;padding:4px;'>GA Type</th><th style='border:1px solid #666;padding:4px;'>Main</th>";
+  for (uint8_t seg = 1; seg < segmentCount && seg < 6; seg++) { // limit to 6 segments for display
+    html += "<th style='border:1px solid #666;padding:4px;'>Seg" + String(seg) + "</th>";
+  }
+  html += "</tr>";
+  
+  // Helper to format GA (convert uint16_t back to a/b/c format)
+  auto formatGA = [](uint16_t ga) -> String {
+    if (ga == 0) return "-";
+    uint8_t main = (ga >> 11) & 0x1F;   
+    uint8_t middle = (ga >> 8) & 0x07;   
+    uint8_t sub = ga & 0xFF;            
+    return String(main) + "/" + String(middle) + "/" + String(sub);
+  };
+  
+  // Collect all GAs used across the entire table for global conflict detection
+  std::vector<uint16_t> allUsedGAs;
+  
+  // Helper to add table row with conflict detection
+  auto addRow = [&](const char* label, const char* centralGA, const char* section = "", bool globalOnly = false) {
+    if (strlen(centralGA) == 0) return; // skip if GA not configured
+    
+    html += "<tr><td style='border:1px solid #666;padding:2px 4px;color:white;'>" + String(label) + "</td>";
+    
+    if (globalOnly) {
+      // For global GAs (Time, Date, Temperature), show only once in main column
+      uint16_t mainGA = parseGA(centralGA);
+      bool mainConflict = (mainGA > 0) && (std::find(allUsedGAs.begin(), allUsedGAs.end(), mainGA) != allUsedGAs.end());
+      if (mainGA > 0) allUsedGAs.push_back(mainGA);
+      
+      String mainBg = mainConflict ? "background:#cc3333;" : "";
+      html += "<td style='border:1px solid #666;padding:2px 4px;color:white;" + mainBg + "'>" + formatGA(mainGA) + "</td>";
+      
+      // Empty cells for other segments
+      for (uint8_t seg = 1; seg < segmentCount && seg < 6; seg++) {
+        html += "<td style='border:1px solid #666;padding:2px 4px;color:white;'>-</td>";
+      }
+    } else {
+      // For per-segment GAs, calculate for each segment
+      // Main segment (segment 0)
+      uint16_t mainGA = calculateSegmentGA(centralGA, 0);
+      bool mainConflict = (mainGA > 0) && (std::find(allUsedGAs.begin(), allUsedGAs.end(), mainGA) != allUsedGAs.end());
+      if (mainGA > 0) allUsedGAs.push_back(mainGA);
+      
+      String mainBg = mainConflict ? "background:#cc3333;" : "";
+      html += "<td style='border:1px solid #666;padding:2px 4px;color:white;" + mainBg + "'>" + formatGA(mainGA) + "</td>";
+      
+      // Other segments
+      for (uint8_t seg = 1; seg < segmentCount && seg < 6; seg++) {
+        uint16_t segGA = calculateSegmentGA(centralGA, seg);
+        bool segConflict = (segGA > 0) && (std::find(allUsedGAs.begin(), allUsedGAs.end(), segGA) != allUsedGAs.end());
+        if (segGA > 0) allUsedGAs.push_back(segGA);
+        
+        String segBg = segConflict ? "background:#cc3333;" : "";
+        html += "<td style='border:1px solid #666;padding:2px 4px;color:white;" + segBg + "'>" + formatGA(segGA) + "</td>";
+      }
+    }
+    html += "</tr>";
+  };
+  
+  // Add INPUT GAs section
+  html += "<tr><td colspan='" + String(1 + min((int)segmentCount, 6)) + "' style='border:1px solid #666;padding:4px;text-align:center;color:white;font-weight:bold;'>INPUT GAs (KNX → WLED)</td></tr>";
+  
+  // Basic INPUT GAs
+  addRow("Power", gaInPower);
+  addRow("Brightness", gaInBri);
+  addRow("Red", gaInR);
+  addRow("Green", gaInG);
+  addRow("Blue", gaInB);
+  addRow("White", gaInW);
+  addRow("CCT", gaInCct);
+  addRow("Warm White", gaInWW);
+  addRow("Cold White", gaInCW);
+  addRow("Hue", gaInH);
+  addRow("Saturation", gaInS);
+  addRow("Value", gaInV);
+  addRow("Effect", gaInFx);
+  addRow("Preset", gaInPreset);
+  addRow("RGB", gaInRGB);
+  addRow("HSV", gaInHSV);
+  addRow("RGBW", gaInRGBW);
+  addRow("Time", gaInTime, "", true);
+  addRow("Date", gaInDate, "", true);
+  addRow("DateTime", gaInDateTime, "", true);
+  
+  // Relative INPUT GAs
+  addRow("Brightness Rel", gaInBriRel);
+  addRow("Red Rel", gaInRRel);
+  addRow("Green Rel", gaInGRel);
+  addRow("Blue Rel", gaInBRel);
+  addRow("White Rel", gaInWRel);
+  addRow("Warm White Rel", gaInWWRel);
+  addRow("Cold White Rel", gaInCWRel);
+  addRow("Hue Rel", gaInHRel);
+  addRow("Saturation Rel", gaInSRel);
+  addRow("Value Rel", gaInVRel);
+  addRow("Effect Rel", gaInFxRel);
+  addRow("RGB Rel", gaInRGBRel);
+  addRow("HSV Rel", gaInHSVRel);
+  addRow("RGBW Rel", gaInRGBWRel);
+  
+  // Add OUTPUT GAs section
+  html += "<tr><td colspan='" + String(1 + min((int)segmentCount, 6)) + "' style='border:1px solid #666;padding:4px;text-align:center;color:white;font-weight:bold;'>OUTPUT GAs (WLED → KNX)</td></tr>";
+  
+  // Basic OUTPUT GAs
+  addRow("Power", gaOutPower);
+  addRow("Brightness", gaOutBri);
+  addRow("Red", gaOutR);
+  addRow("Green", gaOutG);
+  addRow("Blue", gaOutB);
+  addRow("White", gaOutW);
+  addRow("CCT", gaOutCct);
+  addRow("Warm White", gaOutWW);
+  addRow("Cold White", gaOutCW);
+  addRow("Hue", gaOutH);
+  addRow("Saturation", gaOutS);
+  addRow("Value", gaOutV);
+  addRow("Effect", gaOutFx);
+  addRow("Preset", gaOutPreset);
+  addRow("RGB", gaOutRGB);
+  addRow("HSV", gaOutHSV);
+  addRow("RGBW", gaOutRGBW);
+  addRow("Internal Temp", gaOutIntTemp, "", true);
+  addRow("Temp Sensor", gaOutTemp, "", true);
+  addRow("Int Temp Alarm", gaOutIntTempAlarm, "", true);
+  addRow("Temp Alarm", gaOutTempAlarm, "", true);
+  
+  html += "</table>";
+  
+  // Add offset information
+  html += "<div style='font-size:10px;margin-top:4px;color:#aaa;'>Offsets: L=" + String(segmentOffsetL) + ", M=" + String(segmentOffsetM) + ", N=" + String(segmentOffsetN) + "</div>";
+  
+  KNX_UM_DEBUGF("[KNX-UM] getGATableHTML: generated %d chars\n", html.length());
+  
+  return html;
+}
+
 // -------------------- Usermod API --------------------
 void KnxIpUsermod::setup() {
   if (!enabled) return;
@@ -1279,6 +2141,9 @@ void KnxIpUsermod::setup() {
   if (GA_OUT_INT_TEMP_ALARM) KNX.addGroupObject(GA_OUT_INT_TEMP_ALARM, DptMain::DPT_1xx, /*tx=*/true, /*rx=*/false);
   if (GA_OUT_TEMP_ALARM)     KNX.addGroupObject(GA_OUT_TEMP_ALARM,     DptMain::DPT_1xx, /*tx=*/true, /*rx=*/false);
 
+  // Register per-segment KOs
+  registerSegmentKOs();
+
   Serial.printf("[KNX-UM] OUT intTemp=0x%04X temp=0x%04X\n", GA_OUT_INT_TEMP, GA_OUT_TEMP);
   Serial.printf("[KNX-UM] OUT intTempAlarm=0x%04X tempAlarm=0x%04X (thr: %.1f/%.1f °C, hyst=%.1f)\n",
   
@@ -1321,6 +2186,10 @@ void KnxIpUsermod::setup() {
   } else {
     KNX_UDP_LOG("[KNX-UM] Network type: WiFi");
   }
+  
+  // Check for GA conflicts and notify GUI if found
+  // Do this after KNX initialization to ensure all GAs are registered
+  checkGAConflictsAndNotifyGUI();
 }
 
 void KnxIpUsermod::publishState() {
@@ -1693,6 +2562,9 @@ void KnxIpUsermod::addToConfig(JsonObject& root) {
   top["Temperature Alarm Hysteresis"] = tempAlarmHystC;
   top["auto_enable_on_color"]     = autoEnableOnColor;
   top["auto_enable_brightness"]   = autoEnableBrightness;
+  top["segment_offset_L"]         = segmentOffsetL;
+  top["segment_offset_M"]         = segmentOffsetM;
+  top["segment_offset_N"]         = segmentOffsetN;
 
 
   JsonObject gIn  = top.createNestedObject("GA in");
@@ -1777,6 +2649,12 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
   autoEnableOnColor     = top["auto_enable_on_color"]     | autoEnableOnColor;
   autoEnableBrightness  = top["auto_enable_brightness"]   | autoEnableBrightness;
   if (autoEnableBrightness > 255) autoEnableBrightness = 255;
+  segmentOffsetL        = top["segment_offset_L"]         | segmentOffsetL;
+  segmentOffsetM        = top["segment_offset_M"]         | segmentOffsetM;
+  segmentOffsetN        = top["segment_offset_N"]         | segmentOffsetN;
+  if (segmentOffsetL > 31) segmentOffsetL = 31;
+  if (segmentOffsetM > 7) segmentOffsetM = 7;
+  if (segmentOffsetN > 255) segmentOffsetN = 255;
 
 
   // accept either "GA in"/"GA out" (what we save) or "in"/"out"
@@ -2083,10 +2961,54 @@ bool KnxIpUsermod::readFromConfig(JsonObject& root) {
       KNX.groupValueRead(primer);
     } else {
       // Enabled but not running yet (e.g., Wi-Fi not ready) → try to start
-      KNX.begin();                                                 // joins multicast, sets TTL/LOOP/IF :contentReference[oaicite:5]{index=5}
+      KNX.begin();                                                 // joins multicast, sets TTL/LOOP/IF
     }
   }
+  
+  // Check for GA conflicts after configuration changes
+  // This will set GUI error flag if conflicts are detected
+  checkGAConflictsAndNotifyGUI();
+  
   return true;
+}
+
+void KnxIpUsermod::addToJsonInfo(JsonObject& root) {
+  if (!enabled) {
+    KNX_UM_DEBUGF("[KNX-UM] addToJsonInfo called but usermod disabled\n");
+    return;
+  }
+  
+  KNX_UM_DEBUGF("[KNX-UM] addToJsonInfo called - adding usermod info to JSON\n");
+  
+  // Create usermod object if it doesn't exist
+  JsonObject user = root["u"];
+  if (user.isNull()) user = root.createNestedObject("u");
+  
+  // Add basic KNX status info first (simpler test)
+  JsonArray knxStatus = user.createNestedArray("KNX Status");
+  if (KNX.running()) {
+    knxStatus.add("Connected");
+    knxStatus.add("");
+    KNX_UM_DEBUGF("[KNX-UM] Added KNX Status: Connected\n");
+  } else {
+    knxStatus.add("Disconnected");
+    knxStatus.add("");
+    KNX_UM_DEBUGF("[KNX-UM] Added KNX Status: Disconnected\n");
+  }
+  
+  // Add segment count for testing
+  JsonArray segInfo = user.createNestedArray("KNX Segments");
+  segInfo.add(strip.getSegmentsNum());
+  segInfo.add("segments");
+  
+  // Try adding the GA table as HTML
+  String gaTable = getGATableHTML();
+  if (gaTable.length() > 0 && gaTable.length() < 25000) { // increased limit for comprehensive GA table with all types
+    user["KNX GA Table"] = gaTable;
+    KNX_UM_DEBUGF("[KNX-UM] GA table added to JSON (%d chars)\n", gaTable.length());
+  } else {
+    KNX_UM_DEBUGF("[KNX-UM] GA table too large or empty (%d chars)\n", gaTable.length());
+  }
 }
 
 void KnxIpUsermod::appendConfigData(Print& uiScript)
@@ -2144,7 +3066,7 @@ void KnxIpUsermod::appendConfigData(Print& uiScript)
   uiScript.print(F("addInfo(uxIn+':rgbw_rel',1,' [R,G,B,W,4Bytes] (DPT 3.007)');"));
 
   // ---- GA out ----
-  uiScript.print(F("addInfo(uxOut+':power',1,' [-]  (DPT 1.001)');"));
+  uiScript.print(F("addInfo(uxOut+':power',1,' [-]  (DPT 1.011)');"));
   uiScript.print(F("addInfo(uxOut+':bri',1,' [0..100] (DPT 5.001)');"));
   uiScript.print(F("addInfo(uxOut+':r',1,' [0..255] (DPT 5.010)');"));
   uiScript.print(F("addInfo(uxOut+':g',1,' [0..255] (DPT 5.010)');"));

@@ -2,6 +2,8 @@
 
 #include "wled.h"
 #include "esp-knx-ip.h"
+#include <vector>
+#include <algorithm>
 
 // Debug logging control: define KNX_UM_DEBUG at build time to enable verbose logs
 #ifdef KNX_UM_DEBUG
@@ -72,7 +74,7 @@ public:
   char  gaInRGBWRel[16] = "1/1/28";  // DPST-251-600 relative RGBW (4 or 6 bytes: R,G,B,W DPT3)
 
   // Outbound GAs (state feedback WLED -> KNX)
-  char  gaOutPower[16]   = "2/0/1";    // DPT 1.001
+  char  gaOutPower[16]   = "2/0/1";    // DPT 1.011 (state)
   char  gaOutBri[16]     = "2/0/2";    // DPT 5.001 (0..100%)
   char  gaOutR[16]       = "2/1/1";    // DPT 5.010 (0..255)
   char  gaOutG[16]       = "2/1/2";    // DPT 5.010 (0..255)
@@ -127,12 +129,18 @@ public:
   bool     autoEnableOnColor     = true;    // Enable auto-brightness feature
   uint8_t  autoEnableBrightness  = 128;     // Brightness to set (0-255)
 
+  // Per-segment KO offset configuration
+  uint8_t  segmentOffsetL = 0;      // Offset for main group (L)
+  uint8_t  segmentOffsetM = 1;      // Offset for middle group (M) 
+  uint8_t  segmentOffsetN = 0;      // Offset for sub group (N)
+
 
   // --- Usermod API ---
   void setup();
   void loop();
   void addToConfig(JsonObject& root);
   bool readFromConfig(JsonObject& root);
+  void addToJsonInfo(JsonObject& root);
   uint16_t getId() { return USERMOD_ID_KNX_IP; }
   const char* getName() { return "KNX_IP"; }
 
@@ -141,6 +149,27 @@ public:
   // --- Validation helpers (callable before saving config) ---
   static bool validateGroupAddressString(const char* s);  // "x/y/z" within KNX 3-level limits
   static bool validateIndividualAddressString(const char* s); // "a.b.c" within area/line/device limits
+
+  // --- Per-segment KO helpers ---
+  uint16_t calculateSegmentGA(const char* centralGA, uint8_t segmentIndex) const;
+  void registerSegmentKOs();
+  void clearSegmentKOs();
+  bool validateSegmentGAs() const;
+  bool isGAInUse(uint16_t ga) const;
+  std::vector<uint16_t> getAllUsedGAs() const;
+  bool hasGAConflicts(uint8_t maxSegments = 0) const;
+  void analyzeGAConflicts() const;
+  
+  // GA table for Info panel display
+  String getGATableHTML() const;
+  
+  // Test methods
+  void testGAConflictDetection();
+  void testValidationIntegration();
+  void runGAConflictTests();
+  
+  // GUI error notification
+  void checkGAConflictsAndNotifyGUI();
 
 private:
   // --- TX coalescing flags/timer ---
@@ -171,6 +200,15 @@ private:
   uint16_t GA_OUT_INT_TEMP_ALARM = 0, GA_OUT_TEMP_ALARM = 0;
   uint16_t GA_OUT_PWR = 0, GA_OUT_BRI = 0, GA_OUT_R = 0, GA_OUT_G = 0;
   uint16_t GA_OUT_B = 0, GA_OUT_FX = 0, GA_OUT_PRESET = 0, GA_OUT_PRE = 0;
+
+  // Per-segment KO caches (dynamically sized based on actual segments)
+  uint16_t* GA_SEG_IN_PWR = nullptr;   // Array of power input GAs per segment
+  uint16_t* GA_SEG_IN_BRI = nullptr;   // Array of brightness input GAs per segment
+  uint16_t* GA_SEG_IN_FX = nullptr;    // Array of effect input GAs per segment
+  uint16_t* GA_SEG_OUT_PWR = nullptr;  // Array of power output GAs per segment
+  uint16_t* GA_SEG_OUT_BRI = nullptr;  // Array of brightness output GAs per segment
+  uint16_t* GA_SEG_OUT_FX = nullptr;   // Array of effect output GAs per segment
+  uint8_t  numSegments = 0;            // Current number of segments
 
 
   // Track last preset value we set (used for OUT if configured)
@@ -218,6 +256,12 @@ private:
   void onKnxHSVRel(uint8_t hCtl, uint8_t sCtl, uint8_t vCtl);
   void onKnxRGBWRel(uint8_t rCtl, uint8_t gCtl, uint8_t bCtl, uint8_t wCtl);
   void adjustWhiteSplitRel(int16_t delta, bool adjustWarm); // delta applied to derived warm (adjustWarm=true) or cold component
+
+  // Per-segment KO handlers
+  void onKnxSegmentPower(uint8_t segmentIndex, bool on);
+  void onKnxSegmentBrightness(uint8_t segmentIndex, uint8_t pct);
+  void onKnxSegmentRGB(uint8_t segmentIndex, uint8_t r, uint8_t g, uint8_t b);
+  void onKnxSegmentEffect(uint8_t segmentIndex, uint8_t fxIndex);
 
   void evalAndPublishTempAlarm(uint16_t ga, float tempC, float maxC, bool& lastState, const char* tag);
 

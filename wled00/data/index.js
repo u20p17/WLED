@@ -15,6 +15,7 @@ var pcMode = false, pcModeA = false, lastw = 0, wW;
 var simplifiedUI = false;
 var tr = 7;
 var d = document;
+var currentError = null, currentErrorMsg = "";
 const ranges = RangeTouch.setup('input[type="range"]', {});
 var retry = false;
 var palettesData;
@@ -711,12 +712,17 @@ function populateInfo(i)
 	if (pwr > 1000) {pwr /= 1000; pwr = pwr.toFixed((pwr > 10) ? 0 : 1); pwru = pwr + " A";}
 	else if (pwr > 0) {pwr = 50 * Math.round(pwr/50); pwru = pwr + " mA";}
 	var urows="";
+	var knxTable = "";
 	if (i.u) {
 		for (const [k, val] of Object.entries(i.u)) {
-			if (val[1])
+			if (k === "KNX GA Table" && typeof val === "string") {
+				// Special handling for KNX GA table - display as raw HTML
+				knxTable = val;
+			} else if (val[1]) {
 				urows += inforow(k,val[0],val[1]);
-			else
+			} else {
 				urows += inforow(k,val);
+			}
 		}
 	}
 	var vcn = "Kuuhaku";
@@ -725,6 +731,10 @@ function populateInfo(i)
 	cn += `v${i.ver} "${vcn}"<br><br><table>
 ${urows}
 ${urows===""?'':'<tr><td colspan=2><hr style="height:1px;border-width:0;color:gray;background-color:gray"></td></tr>'}
+${knxTable ? '<tr><td colspan=2 style="padding:5px;"><div style="font-weight:bold;margin-bottom:5px;">KNX Group Address Mapping</div>' + knxTable + '</td></tr>' : ''}
+${knxTable ? '<tr><td colspan=2><hr style="height:1px;border-width:0;color:gray;background-color:gray"></td></tr>' : ''}
+${currentError ? inforow("<span style='color:var(--c-r)'>Error " + currentError + "</span>", "<span style='color:var(--c-r)'>" + currentErrorMsg + "</span>") : ''}
+${currentError ? '<tr><td colspan=2><hr style="height:1px;border-width:0;color:gray;background-color:gray"></td></tr>' : ''}
 ${i.opt&0x100?inforow("Debug","<button class=\"btn btn-xs\" onclick=\"requestJson({'debug':"+(i.opt&0x0080?"false":"true")+"});\"><i class=\"icons "+(i.opt&0x0080?"on":"off")+"\">&#xe08f;</i></button>"):''}
 ${inforow("Build",i.vid)}
 ${inforow("Signal strength",i.wifi.signal +"% ("+ i.wifi.rssi, " dBm)")}
@@ -1526,8 +1536,32 @@ function readState(s,command=false)
 			case 19:
 				errstr = "A filesystem error has occured.";
 				break;
+			case 33:
+				errstr = "KNX Group Address conflict detected.";
+				break;
 		}
+		
+		// Use detailed error message if available, otherwise use the standard error string
+		if (s.error_msg && s.error_msg.length > 0) {
+			errstr = s.error_msg;
+		}
+		
+		// Store error info globally for Info panel display
+		currentError = s.error;
+		currentErrorMsg = errstr;
+		
+		// Update Info panel if it's currently active
+		if (isInfo && lastinfo) populateInfo(lastinfo);
+		
 		showToast('Error ' + s.error + ": " + errstr, true);
+	} else {
+		// Clear error state when no error
+		var hadError = currentError !== null;
+		currentError = null;
+		currentErrorMsg = "";
+		
+		// Update Info panel if it's currently active and we had an error before
+		if (hadError && isInfo && lastinfo) populateInfo(lastinfo);
 	}
 
 	selectedPal = i.pal;
