@@ -691,96 +691,109 @@ void KnxIpUsermod::clearSegmentKOs() {
 }
 
 void KnxIpUsermod::registerSegmentKOs() {
+  // reset any previous allocations
   clearSegmentKOs();
-  
+
+  // how many WLED segments?
   numSegments = strip.getSegmentsNum();
-  if (numSegments > 32) {  // Reasonable limit to prevent memory issues
-    numSegments = 32;
+  if (numSegments > 32) {
     KNX_UM_WARNF("[KNX-UM][WARN] Too many segments (%d), limiting to 32\n", strip.getSegmentsNum());
+    numSegments = 32;
   }
-  
   if (numSegments == 0) {
     KNX_UM_DEBUGF("[KNX-UM] No segments found, skipping per-segment KO registration\n");
     return;
   }
-  
-  // Validate GAs for conflicts before registration
+
+  // Validate GA plan before registering anything
   if (!validateSegmentGAs()) {
     KNX_UM_WARNF("[KNX-UM][ERROR] GA conflicts detected! Skipping segment KO registration to prevent issues.\n");
-    KNX_UM_WARNF("[KNX-UM][ERROR] Please adjust segment offsets (L=%d, M=%d, N=%d) or central GAs.\n", 
+    KNX_UM_WARNF("[KNX-UM][ERROR] Please adjust segment offsets (L=%d, M=%d, N=%d) or central GAs.\n",
                  segmentOffsetL, segmentOffsetM, segmentOffsetN);
-    
-    // Ensure GUI error flag is set (validateSegmentGAs already sets it, but make sure)
     extern byte errorFlag;
     if (errorFlag == 0) errorFlag = 33; // ERR_KNX_GA_CONFLICT
-    
     return;
   }
-  
+
   KNX_UM_DEBUGF("[KNX-UM] Registering per-segment KOs for %d segments\n", numSegments);
-  
-  // Allocate arrays for segments (only the main controls)
+
+  // Allocate arrays (main controls only)
   GA_SEG_IN_PWR = new uint16_t[numSegments]();
   GA_SEG_IN_BRI = new uint16_t[numSegments]();
-  GA_SEG_IN_FX = new uint16_t[numSegments]();
-  
+  GA_SEG_IN_FX  = new uint16_t[numSegments]();
+
   GA_SEG_OUT_PWR = new uint16_t[numSegments]();
   GA_SEG_OUT_BRI = new uint16_t[numSegments]();
-  GA_SEG_OUT_FX = new uint16_t[numSegments]();
-  
-  // For each segment, calculate GAs and register handlers
+  GA_SEG_OUT_FX  = new uint16_t[numSegments]();
+
+  // Parse central GAs once so we can avoid duplicate seg0 registration
+  const uint16_t centralInPwr  = parseGA(gaInPower);
+  const uint16_t centralInBri  = parseGA(gaInBri);
+  const uint16_t centralInFx   = parseGA(gaInFx);
+  const uint16_t centralOutPwr = parseGA(gaOutPower);
+  const uint16_t centralOutBri = parseGA(gaOutBri);
+  const uint16_t centralOutFx  = parseGA(gaOutFx);
+
+  // For each segment, calculate and (conditionally) register
   for (uint8_t seg = 0; seg < numSegments; seg++) {
-    // Calculate segment GAs using central GAs as templates
-    GA_SEG_IN_PWR[seg] = calculateSegmentGA(gaInPower, seg);
-    GA_SEG_IN_BRI[seg] = calculateSegmentGA(gaInBri, seg);
-    GA_SEG_IN_FX[seg] = calculateSegmentGA(gaInFx, seg);
-    
+    // Calculate per-segment addresses from central + offsets
+    GA_SEG_IN_PWR[seg]  = calculateSegmentGA(gaInPower,  seg);
+    GA_SEG_IN_BRI[seg]  = calculateSegmentGA(gaInBri,    seg);
+    GA_SEG_IN_FX[seg]   = calculateSegmentGA(gaInFx,     seg);
+
     GA_SEG_OUT_PWR[seg] = calculateSegmentGA(gaOutPower, seg);
-    GA_SEG_OUT_BRI[seg] = calculateSegmentGA(gaOutBri, seg);
-    GA_SEG_OUT_FX[seg] = calculateSegmentGA(gaOutFx, seg);
-    
-    // Register input handlers for this segment using existing patterns
-    if (GA_SEG_IN_PWR[seg]) {
+    GA_SEG_OUT_BRI[seg] = calculateSegmentGA(gaOutBri,   seg);
+    GA_SEG_OUT_FX[seg]  = calculateSegmentGA(gaOutFx,    seg);
+
+    // ===== IN: register only if not duplicating the central GA on seg0 =====
+    if (GA_SEG_IN_PWR[seg] &&
+        !(seg == 0 && GA_SEG_IN_PWR[seg] == centralInPwr)) {
       KNX.addGroupObject(GA_SEG_IN_PWR[seg], DptMain::DPT_1xx, false, true);
-      KNX.onGroup(GA_SEG_IN_PWR[seg], [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-        if (svc == KnxService::GroupValue_Write && p && len >= 1) {
-          this->onKnxSegmentPower(seg, p[0] & 1);
+      KNX.onGroup(GA_SEG_IN_PWR[seg],
+        [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+          if (svc == KnxService::GroupValue_Write && p && len >= 1) this->onKnxSegmentPower(seg, p[0] & 1);
         }
-      });
+      );
     }
-    
-    if (GA_SEG_IN_BRI[seg]) {
+
+    if (GA_SEG_IN_BRI[seg] &&
+        !(seg == 0 && GA_SEG_IN_BRI[seg] == centralInBri)) {
       KNX.addGroupObject(GA_SEG_IN_BRI[seg], DptMain::DPT_5xx, false, true);
-      KNX.onGroup(GA_SEG_IN_BRI[seg], [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-        if (svc == KnxService::GroupValue_Write && p && len >= 1) {
-          this->onKnxSegmentBrightness(seg, p[0]);
+      KNX.onGroup(GA_SEG_IN_BRI[seg],
+        [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+          if (svc == KnxService::GroupValue_Write && p && len >= 1) this->onKnxSegmentBrightness(seg, KnxIpCore::unpackScaling(p, len));
         }
-      });
+      );
     }
-    
-    if (GA_SEG_IN_FX[seg]) {
+
+    if (GA_SEG_IN_FX[seg] &&
+        !(seg == 0 && GA_SEG_IN_FX[seg] == centralInFx)) {
       KNX.addGroupObject(GA_SEG_IN_FX[seg], DptMain::DPT_5xx, false, true);
-      KNX.onGroup(GA_SEG_IN_FX[seg], [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
-        if (svc == KnxService::GroupValue_Write && p && len >= 1) {
-          this->onKnxSegmentEffect(seg, p[0]);
+      KNX.onGroup(GA_SEG_IN_FX[seg],
+        [this, seg](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+          if (svc == KnxService::GroupValue_Write && p && len >= 1) this->onKnxSegmentEffect(seg, p[0]);
         }
-      });
+      );
     }
-    
-    // Register output objects (for status publishing)
-    if (GA_SEG_OUT_PWR[seg]) {
+
+    // ===== OUT: same skip rule for status objects =====
+    if (GA_SEG_OUT_PWR[seg] &&
+        !(seg == 0 && GA_SEG_OUT_PWR[seg] == centralOutPwr)) {
       KNX.addGroupObject(GA_SEG_OUT_PWR[seg], DptMain::DPT_1xx, true, false);
     }
-    if (GA_SEG_OUT_BRI[seg]) {
+    if (GA_SEG_OUT_BRI[seg] &&
+        !(seg == 0 && GA_SEG_OUT_BRI[seg] == centralOutBri)) {
       KNX.addGroupObject(GA_SEG_OUT_BRI[seg], DptMain::DPT_5xx, true, false);
     }
-    if (GA_SEG_OUT_FX[seg]) {
-      KNX.addGroupObject(GA_SEG_OUT_FX[seg], DptMain::DPT_5xx, true, false);
+    if (GA_SEG_OUT_FX[seg] &&
+        !(seg == 0 && GA_SEG_OUT_FX[seg] == centralOutFx)) {
+      KNX.addGroupObject(GA_SEG_OUT_FX[seg],  DptMain::DPT_5xx, true, false);
     }
   }
-  
+
   KNX_UM_DEBUGF("[KNX-UM] Per-segment KO registration complete\n");
 }
+
 
 // ---- Small helper registration shims to reduce lambda repetition ----
 // Registers a 1-byte inbound object (if ga!=0) and wires a simple callback taking the first byte.
@@ -791,6 +804,19 @@ static void register1ByteHandler(uint16_t ga, DptMain dpt, std::function<void(ui
     if (svc == KnxService::GroupValue_Write && p && len >= 1) cb(p[0]);
   });
 }
+
+// Registers a DPT 5.001 (Scaling 0..100%) inbound object and passes pct (0..100) to cb
+static void registerScalingHandler(uint16_t ga, std::function<void(uint8_t)> cb) {
+  if (!ga) return;
+  KNX.addGroupObject(ga, DptMain::DPT_5xx, false, true);
+  KNX.onGroup(ga, [cb](uint16_t, DptMain, KnxService svc, const uint8_t* p, uint8_t len){
+    if (svc == KnxService::GroupValue_Write && p && len >= 1) {
+      uint8_t pct = KnxIpCore::unpackScaling(p, len);  // 0..255 → 0..100%
+      cb(pct);
+    }
+  });
+}
+
 
 // Registers a multi-byte inbound object (if ga!=0) and wires a callback taking pointer to payload (len already checked).
 static void registerMultiHandler(uint16_t ga, DptMain dpt, uint8_t minLen, std::function<void(const uint8_t*)> cb) {
@@ -2089,9 +2115,8 @@ void KnxIpUsermod::setup() {
   }
 
   if (GA_IN_BRI) {
-    register1ByteHandler(GA_IN_BRI, DptMain::DPT_5xx, [this](uint8_t v){ onKnxBrightness(v); });
+    registerScalingHandler(GA_IN_BRI, [this](uint8_t pct){ onKnxBrightness(pct); });
   }
-
   // RGB inputs (masked to 0 if unsupported)
   if (GA_IN_R) {
     register1ByteHandler(GA_IN_R, DptMain::DPT_5xx, [this](uint8_t r){
