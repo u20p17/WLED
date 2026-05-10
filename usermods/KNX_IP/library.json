@@ -1,0 +1,4 @@
+{
+  "name": "KNX_IP",
+  "build": { "libArchive": false }
+}

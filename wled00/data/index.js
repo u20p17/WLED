@@ -706,10 +706,10 @@ function populateInfo(i)
 	var urows="";
 	if (i.u) {
 		for (const [k, val] of Object.entries(i.u)) {
-			if (val[1])
-				urows += inforow(k,val[0],val[1]);
+			if (Array.isArray(val))
+				urows += inforow(k, val[0] ?? "", val[1] ?? "");
 			else
-				urows += inforow(k,val);
+				urows += inforow(k, val ?? "");
 		}
 	}
 	var vcn = "Kuuhaku";
